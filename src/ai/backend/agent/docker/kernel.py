@@ -275,18 +275,18 @@ async def prepare_krunner_env_impl(distro: str) -> Tuple[str, Optional[str]]:
             if e.status == 404:
                 do_create = True
         if do_create:
-            log.info('populating {} volume version {}',
-                     volume_name, current_version)
-            await docker.volumes.create({
-                'Name': volume_name,
-                'Driver': 'local',
-            })
             archive_path = Path(pkg_resources.resource_filename(
                 f'ai.backend.krunner.{distro_name}',
                 f'krunner-env.{distro}.{arch}.tar.xz')).resolve()
             if not archive_path.exists():
-                log.warning("krunner environment for {}.{} is not supported!", distro, arch)
+                log.warning("krunner environment for {} ({}) is not supported!", distro, arch)
             else:
+                log.info('populating {} volume version {}',
+                         volume_name, current_version)
+                await docker.volumes.create({
+                    'Name': volume_name,
+                    'Driver': 'local',
+                })
                 extractor_path = Path(pkg_resources.resource_filename(
                     'ai.backend.runner',
                     'krunner-extractor.sh')).resolve()
