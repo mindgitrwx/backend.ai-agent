@@ -242,7 +242,7 @@ async def prepare_krunner_env_impl(distro: str) -> Tuple[str, Optional[str]]:
             f'ai.backend.krunner.{distro_name}',
             f'./krunner-version.{distro}.txt'))
         .read_text().strip())
-    volume_name = f'backendai-krunner.v{current_version}.{distro}'
+    volume_name = f'backendai-krunner.v{current_version}.{arch}.{distro}'
     extractor_image = 'backendai-krunner-extractor:latest'
 
     try:

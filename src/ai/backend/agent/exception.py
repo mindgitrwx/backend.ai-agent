@@ -26,6 +26,10 @@ class InsufficientResource(ResourceError):
     pass
 
 
+class UnsupportedBaseDistroError(RuntimeError):
+    pass
+
+
 class K8sError(Exception):
     def __init__(self, message):
         super().__init__(message)
