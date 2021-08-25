@@ -76,6 +76,7 @@ scratches/
 
 # Local config
 agent.toml
+cuda-mock.toml
 
 # auto-generated files
 scripts/*.dockerfile

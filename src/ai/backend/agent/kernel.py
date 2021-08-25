@@ -897,4 +897,5 @@ def match_distro_data(data: Mapping[str, Any], distro: str) -> Tuple[str, Any]:
         for distro_key, value in match_list:
             if distro_key == distro:
                 return (distro_key, value)
+        return match_list[0]  # fallback to the latest of its kind
     raise RuntimeError('no match found', distro)
