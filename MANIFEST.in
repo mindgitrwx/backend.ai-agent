@@ -7,7 +7,7 @@ include src/ai/backend/runner/*.sh
 include src/ai/backend/runner/*.txt
 include src/ai/backend/runner/.vimrc
 include src/ai/backend/runner/.bashrc
-include src/ai/backend/runner/.bashrc_profile
+include src/ai/backend/runner/.bash_profile
 include src/ai/backend/runner/.tmux.conf
 include src/ai/backend/runner/terminfo.alpine3.8
 include src/ai/backend/agent/docker/*.version.txt
