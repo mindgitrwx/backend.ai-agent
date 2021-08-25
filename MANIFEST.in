@@ -1,3 +1,9 @@
-include src/ai/backend/runner/*
-include src/ai/backend/agent/docker/*.tar.gz
+# In the source distribution, we exclude prebuilt binaries and artifacts.
+include src/ai/backend/runner/logo.svg
+include src/ai/backend/runner/*.css
+include src/ai/backend/runner/*.md
+include src/ai/backend/runner/*.py
+include src/ai/backend/runner/*.sh
+include src/ai/backend/runner/*.txt
+include src/ai/backend/runner/terminfo.alpine3.8
 include src/ai/backend/agent/docker/*.version.txt

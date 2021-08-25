@@ -141,7 +141,7 @@ jobs:
         killall -9 python || true
         codecov
 
-  deploy-to-pypi:
+  sdist:
     needs: [lint, typecheck, test]
     if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -149,7 +149,7 @@ jobs:
     - uses: actions/checkout@v2
       with:
         lfs: true
-    - name: Set up Python 3.9
+    - name: Set up Python
       uses: actions/setup-python@v2
       with:
         python-version: 3.9
@@ -173,10 +173,101 @@ jobs:
         fi
         set -e
         python -m pip install -U -r requirements/${REQUIREMENTS_FILE}.txt
-    - name: Build and publish
+    - name: Build wheel
+      run: |
+        python setup.py sdist
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: dist
+        path: dist
+
+  bdist_wheel:
+    needs: [lint, typecheck, test]
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04]
+        python: ["3.9"]
+        arch: [x86_64, aarch64]
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        lfs: true
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python }}
+    - name: Install dependencies
+      env:
+        REQUIREMENTS_FILE: build
+      run: |
+        sudo apt-get install libsnappy-dev
+        python -m pip install -U pip setuptools
+        if [ -n "$GITHUB_HEAD_REF" ]; then
+          export GHBRANCH="${GITHUB_HEAD_REF#refs/heads/}"
+        else
+          export GHBRANCH="${GITHUB_REF#refs/heads/}"
+        fi
+        echo "HEAD: ${GHBRANCH} (${GITHUB_REF}, ${GITHUB_HEAD_REF})"
+        # Use the same branch (if exists) for the backend.ai-common installation
+        set +e
+        git ls-remote --heads 'https://github.com/lablup/backend.ai-common' | grep -q "refs/heads/${GHBRANCH}"
+        if [ $? -eq 0 ]; then
+          sed -i "s%\(backend.ai-common\)@main%\1@${GHBRANCH}%" requirements/${REQUIREMENTS_FILE}.txt
+        fi
+        set -e
+        # Override MANIFEST.in
+        cp MANIFEST-wheel.in MANIFEST.in
+        sed -i "s/ARCH/${{ matrix.arch }}/g" MANIFEST.in
+        python -m pip install -U -r requirements/${REQUIREMENTS_FILE}.txt
+    - name: Build wheel
+      run: |
+        python setup.py bdist_wheel
+        PKGVER=$(python -c 'from ai.backend.agent import __version__; print(__version__, end="")')
+        MANYLINUX_PTAG=manylinux2014_${{ matrix.arch }}
+        # MUSL_PTAG=musllinux_1_1_${{ matrix.arch }}   # not supported in pypi yet
+        case "${{ matrix.arch }}" in
+        "aarch64")
+          MACOS_PTAG=macosx_11_0_arm64 ;;
+        *)
+          MACOS_PTAG=macosx_11_0_${{ matrix.arch }} ;;
+        esac
+        mv dist/backend.ai_agent-${PKGVER}-*.whl \
+           dist/backend.ai_agent-${PKGVER}-py3-none-${MANYLINUX_PTAG}.${MACOS_PTAG}.whl
+        ls -lh dist
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v2
+      with:
+        name: dist
+        path: dist
+
+  publish:
+    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+    needs: [sdist, bdist_wheel]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        lfs: true
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9
+    - name: Install dependencies
+      run: |
+        python -m pip install -U pip setuptools wheel
+        python -m pip install -U twine
+    - name: Download distributions
+      uses: actions/download-artifact@v2
+      with:
+        name: dist
+        path: dist
+    - name: Publish
       env:
         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
         TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
       run: |
-        python setup.py sdist bdist_wheel
         twine upload dist/*

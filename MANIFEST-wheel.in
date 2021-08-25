@@ -1,0 +1,16 @@
+# When building wheels in the GitHub Actions,
+# this file is used as MANIFEST.in and "ARCH" replaced with the
+# target architecture name.
+include src/ai/backend/runner/logo.svg
+include src/ai/backend/runner/*.css
+include src/ai/backend/runner/*.md
+include src/ai/backend/runner/*.py
+include src/ai/backend/runner/*.sh
+include src/ai/backend/runner/*.ttf
+include src/ai/backend/runner/*.txt
+include src/ai/backend/runner/terminfo.alpine3.8
+include src/ai/backend/runner/*.ARCH.bin
+include src/ai/backend/runner/*.ARCH.so
+include src/ai/backend/runner/*.ARCH.tar.xz
+include src/ai/backend/agent/docker/*.img.ARCH.tar.gz
+include src/ai/backend/agent/docker/*.version.txt
