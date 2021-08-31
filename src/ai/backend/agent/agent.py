@@ -1398,7 +1398,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         label_envs_corecount = image_labels.get('ai.backend.envs.corecount', '')
         envs_corecount = label_envs_corecount.split(',') if label_envs_corecount else []
         cpu_core_count = len(resource_spec.allocations[DeviceName('cpu')][SlotName('cpu')])
-        environ.update({k: str(cpu_core_count) for k in envs_corecount})
+        environ.update({k: str(cpu_core_count) for k in envs_corecount if k not in environ})
 
         # Realize mounts.
         await self.create_kernel__process_mounts(
