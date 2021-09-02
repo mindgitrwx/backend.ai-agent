@@ -16,6 +16,16 @@ Changes
 
 .. towncrier release notes start
 
+20.09.13 (2021-09-02)
+---------------------
+
+### Features
+* Allow overriding shell environment variable from image label ([#302](https://github.com/lablup/backend.ai-agent/issues/302))
+
+### Fixes
+* If there is no exact distro version in the match_distro_data function, the latest distro of the same kind will be returned (e.g.: ubuntu20.04 -> ubuntu16.04). ([#299](https://github.com/lablup/backend.ai-agent/issues/299))
+
+
 20.09.12 (2021-08-23)
 ---------------------
 
