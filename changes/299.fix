@@ -1,1 +1,0 @@
-If there is no exact distro version in the match_distro_data function, the latest distro of the same kind will be returned (e.g.: ubuntu20.04 -> ubuntu16.04).
