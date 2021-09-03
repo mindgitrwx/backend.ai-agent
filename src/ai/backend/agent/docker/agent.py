@@ -681,6 +681,20 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                     },
                 },
             })
+            # RDMA mounts
+            ib_root = Path("/dev/infiniband")
+            if ib_root.is_dir() and (ib_root / "uverbs0").exists():
+                ctx.container_configs.append({
+                    'HostConfig': {
+                        'Devices': [
+                            {
+                                'PathOnHost': "/dev/infiniband",
+                                'PathInContainer': "/dev/infiniband",
+                                'CgroupPermissions': "rwm",
+                            },
+                        ],
+                    },
+                })
 
     async def create_kernel__install_ssh_keypair(
         self,
@@ -911,6 +925,13 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                     for eport, hport in zip(exposed_ports, host_ports)
                 },
                 'PublishAllPorts': False,  # we manage port mapping manually!
+                'CapAdd': [
+                    'IPC_LOCK',  # for hugepages and RDMA
+                ],
+                'Ulimits': [
+                    {"Name": "nofile", "Soft": 1048576, "Hard": 1048576},
+                    {"Name": "memlock", "Soft": -1, "Hard": -1},
+                ],
                 'LogConfig': {
                     'Type': 'local',  # for efficient docker-specific storage
                     'Config': {
