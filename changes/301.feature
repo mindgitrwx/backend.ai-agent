@@ -1,0 +1,1 @@
+Allow overriding of Docker container creation configs using a local JSON file (`agent-docker-container-opts.json` in the same location of `agent.toml` file) to allow monkey-patching them without restarting or redeploying the agents in running clusters

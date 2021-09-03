@@ -968,6 +968,20 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         if self.local_config['debug']['log-kernel-config']:
             log.debug('full container config: {!r}', pretty(container_config))
 
+        # optional local override of docker config
+        extra_container_opts_name = 'agent-docker-container-opts.json'
+        for extra_container_opts_file in [
+            Path('/etc/backend.ai') / extra_container_opts_name,
+            Path.home() / '.config' / 'backend.ai' / extra_container_opts_name,
+            Path.cwd() / extra_container_opts_name,
+        ]:
+            if extra_container_opts_file.is_file():
+                try:
+                    extra_container_opts = json.loads(extra_container_opts_file.read_bytes())
+                    update_nested_dict(container_config, extra_container_opts)
+                except IOError:
+                    pass
+
         # We are all set! Create and start the container.
         try:
             container = await self.docker.containers.create(
