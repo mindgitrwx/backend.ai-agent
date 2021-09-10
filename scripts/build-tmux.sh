@@ -5,7 +5,8 @@ arch=$(uname -m)
 distros=("glibc" "musl")
 
 glibc_builder_dockerfile=$(cat <<'EOF'
-FROM ubuntu:18.04
+FROM ubuntu:20.04
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update
 RUN apt-get install -y make gcc g++ bison flex
 RUN apt-get install -y pkg-config

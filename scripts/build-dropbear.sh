@@ -5,7 +5,7 @@ arch=$(uname -m)
 distros=("glibc" "musl")
 
 glibc_builder_dockerfile=$(cat <<'EOF'
-FROM ubuntu:16.04
+FROM ubuntu:20.04
 RUN apt-get update
 RUN apt-get install -y make gcc
 RUN apt-get install -y autoconf automake zlib1g-dev
