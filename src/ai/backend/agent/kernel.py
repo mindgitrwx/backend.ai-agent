@@ -332,6 +332,7 @@ class AbstractCodeRunner(aobject, metaclass=ABCMeta):
         self.finished_at = None
         if not math.isfinite(exec_timeout) or exec_timeout < 0:
             raise ValueError('execution timeout must be a zero or finite positive number.')
+        self.kernel_id = kernel_id
         self.exec_timeout = exec_timeout
         self.max_record_size = 10 * (2 ** 20)  # 10 MBytes
         self.client_features = client_features or frozenset()

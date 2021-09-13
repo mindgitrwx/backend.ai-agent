@@ -4,6 +4,7 @@ __pycache__/
 
 # C extensions
 *.so
+!src/ai/backend/runner/**/*
 
 # Distribution / packaging
 .Python

@@ -151,20 +151,334 @@ DEAD_STATUS_SET = frozenset([
 ])
 
 
-@attr.s(auto_attribs=True, slots=True)
-class KernelCreationContext:
+KernelObjectType = TypeVar('KernelObjectType', bound=AbstractKernel)
+
+
+class AbstractKernelCreationContext(aobject, Generic[KernelObjectType]):
     kspec_version: int
     kernel_id: KernelId
     kernel_config: KernelCreationConfig
+    local_config: Mapping[str, Any]
     kernel_features: FrozenSet[str]
     image_ref: ImageRef
     internal_data: Mapping[str, Any]
     restarting: bool
-    cancellation_handlers: Sequence[Callable[[], Awaitable[None]]]
+    cancellation_handlers: Sequence[Callable[[], Awaitable[None]]] = []
+    _rx_distro = re.compile(r"\.([a-z-]+\d+\.\d+)\.")
+
+    def __init__(
+        self,
+        kernel_id: KernelId,
+        kernel_config: KernelCreationConfig,
+        local_config: Mapping[str, Any],
+        computers: MutableMapping[str, ComputerContext],
+        restarting: bool = False
+    ):
+        self.image_labels = kernel_config['image']['labels']
+        self.kspec_version = int(self.image_labels.get('ai.backend.kernelspec', '1'))
+        self.kernel_features = frozenset(self.image_labels.get('ai.backend.features', '').split())
+        self.kernel_id = kernel_id
+        self.kernel_config = kernel_config
+        self.image_ref = ImageRef(
+            kernel_config['image']['canonical'],
+            [kernel_config['image']['registry']['name']],
+        )
+        self.internal_data = kernel_config['internal_data'] or {}
+        self.computers = computers
+        self.restarting = restarting
+        self.local_config = local_config
+
+    @abstractmethod
+    async def get_extra_envs(self) -> Mapping[str, str]:
+        return {}
+
+    @abstractmethod
+    async def prepare_resource_spec(
+        self,
+    ) -> Tuple[KernelResourceSpec, Optional[Mapping[str, Any]]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def prepare_scratch(self) -> None:
+        pass
+
+    @abstractmethod
+    async def get_intrinsic_mounts(self) -> Sequence[Mount]:
+        return []
+
+    @abstractmethod
+    async def apply_network(self, cluster_info: ClusterInfo) -> None:
+        """
+        Apply the given cluster network information to the deployment.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def install_ssh_keypair(self, cluster_info: ClusterInfo) -> None:
+        """
+        Install the ssh keypair inside the kernel from cluster_info.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def process_mounts(self, mounts: Sequence[Mount]):
+        raise NotImplementedError
+
+    @abstractmethod
+    async def apply_accelerator_allocation(self, computer, device_alloc) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_krunner_filepath(self, filename) -> Path:
+        """
+        Return matching krunner path object for given filename.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_runner_mount(
+        self,
+        type: MountTypes,
+        src: Union[str, Path],
+        target: Union[str, Path],
+        perm: Literal['ro', 'rw'] = 'ro',
+        is_unmanaged: bool = False,
+        opts: Mapping[str, Any] = None
+    ):
+        """
+        Return mount object to mount target krunner file/folder/volume.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def spawn(
+        self,
+        resource_spec: KernelResourceSpec,
+        resource_opts,
+        environ: Mapping[str, str],
+        service_ports,
+        preopen_ports,
+        cmdargs: List[str],
+    ) -> KernelObjectType:
+        raise NotImplementedError
+
+    @cached(
+        cache=LRUCache(maxsize=32),  # type: ignore
+        key=lambda self: (
+            self.image_ref,
+            self.kernel_config['image']['labels'].get('ai.backend.base-distro', 'ubuntu16.04'),
+        ),
+    )
+    def get_krunner_info(self) -> Tuple[str, str, str, str, str]:
+        image_labels = self.kernel_config['image']['labels']
+        distro = image_labels.get('ai.backend.base-distro', 'ubuntu16.04')
+        matched_distro, krunner_volume = match_distro_data(
+            self.local_config['container']['krunner-volumes'], distro)
+        matched_libc_style = 'glibc'
+        if distro.startswith('alpine'):
+            matched_libc_style = 'musl'
+        krunner_pyver = '3.6'  # fallback
+        if m := re.search(r'^([a-z-]+)(\d+(\.\d+)*)?$', matched_distro):
+            matched_distro_pkgname = m.group(1).replace('-', '_')
+            try:
+                krunner_pyver = Path(pkg_resources.resource_filename(
+                    f'ai.backend.krunner.{matched_distro_pkgname}',
+                    f'krunner-python.{matched_distro}.txt',
+                )).read_text().strip()
+            except FileNotFoundError:
+                pass
+        log.debug('selected krunner: {}', matched_distro)
+        log.debug('selected libc style: {}', matched_libc_style)
+        log.debug('krunner volume: {}', krunner_volume)
+        log.debug('krunner python: {}', krunner_pyver)
+        arch = get_arch_name()
+        return arch, matched_distro, matched_libc_style, krunner_volume, krunner_pyver
+
+    async def mount_vfolders(
+        self,
+        vfolders,
+        resource_spec: KernelResourceSpec,
+    ) -> None:
+        vfolder_mount_map: Mapping[str, str]
+        vfolder_mount_map = self.kernel_config.get('mount_map', {})
+        for vfolder in vfolders:
+            is_unmanaged = False
+            # TODO: update to use storage-proxy-provided mount path
+            if len(vfolder) == 5:
+                folder_name, folder_host, folder_id, folder_perm_literal, host_path_raw = \
+                    cast(MountTuple5, vfolder)
+                if host_path_raw:
+                    is_unmanaged = True
+                    host_path = Path(host_path_raw)
+                else:
+                    mount_path = Path(folder_id)
+                    if mount_path.is_absolute():
+                        # Use the storage proxy-provided path as-is.
+                        host_path = mount_path
+                    else:
+                        host_path = (self.local_config['vfolder']['mount'] / folder_host /
+                                     self.local_config['vfolder']['fsprefix'] / folder_id)
+            elif len(vfolder) == 4:  # for backward compatibility
+                folder_name, folder_host, folder_id, folder_perm_literal = \
+                    cast(MountTuple4, vfolder)
+                host_path = (self.local_config['vfolder']['mount'] / folder_host /
+                             self.local_config['vfolder']['fsprefix'] / folder_id)
+            elif len(vfolder) == 3:  # legacy managers
+                folder_name, folder_host, folder_id = cast(MountTuple3, vfolder)
+                folder_perm_literal = 'rw'
+                host_path = (self.local_config['vfolder']['mount'] / folder_host /
+                             self.local_config['vfolder']['fsprefix'] / folder_id)
+            else:
+                raise RuntimeError(
+                    'Unexpected number of vfolder mount detail tuple size')
+            if self.internal_data.get('prevent_vfolder_mounts', False):
+                # Only allow mount of ".logs" directory to prevent expose
+                # internal-only information, such as Docker credentials to user's ".docker" vfolder
+                # in image importer kernels.
+                if folder_name != '.logs':
+                    continue
+            if kernel_path_raw := vfolder_mount_map.get(folder_name):
+                if not kernel_path_raw.startswith('/home/work/'):  # type: ignore
+                    raise ValueError(
+                        f'Error while mounting {folder_name} to {kernel_path_raw}: '
+                        'all vfolder mounts should be under /home/work')
+                kernel_path = Path(kernel_path_raw)  # type: ignore
+            else:
+                kernel_path = Path(f'/home/work/{folder_name}')
+            folder_perm = MountPermission(folder_perm_literal)
+            mount = Mount(
+                MountTypes.BIND,
+                host_path,
+                kernel_path,
+                folder_perm,
+                is_unmanaged=is_unmanaged,
+            )
+            resource_spec.mounts.append(mount)
+
+    async def mount_krunner(
+        self,
+        resource_spec: KernelResourceSpec,
+        environ: MutableMapping[str, str]
+    ) -> None:
+
+        def _mount(
+            type, src, dst,
+            is_unmanaged=False
+        ):
+            resource_spec.mounts.append(
+                self.get_runner_mount(
+                    type, src, dst,
+                    MountPermission('ro'), is_unmanaged=is_unmanaged
+                )
+            )
+
+        # Inject Backend.AI kernel runner dependencies.
+        image_labels = self.kernel_config['image']['labels']
+        distro = image_labels.get('ai.backend.base-distro', 'ubuntu16.04')
+
+        arch, matched_distro, matched_libc_style, krunner_volume, krunner_pyver = \
+            self.get_krunner_info()
+        artifact_path = Path(pkg_resources.resource_filename(
+            'ai.backend.agent', '../runner'))
+
+        def find_artifacts(pattern: str) -> Mapping[str, str]:
+            artifacts = {}
+            for p in artifact_path.glob(pattern):
+                m = self._rx_distro.search(p.name)
+                if m is not None:
+                    artifacts[m.group(1)] = p.name
+            return artifacts
+
+        suexec_candidates = find_artifacts(f"su-exec.*.{arch}.bin")
+        _, suexec_candidate = match_distro_data(suexec_candidates, distro)
+        suexec_path = self.resolve_krunner_filepath('runner/' + suexec_candidate)
+
+        hook_candidates = find_artifacts(f"libbaihook.*.{arch}.so")
+        _, hook_candidate = match_distro_data(hook_candidates, distro)
+        hook_path = self.resolve_krunner_filepath('runner/' + hook_candidate)
+
+        sftp_server_candidates = find_artifacts(f"sftp-server.*.{arch}.bin")
+        _, sftp_server_candidate = match_distro_data(sftp_server_candidates, distro)
+        sftp_server_path = self.resolve_krunner_filepath('runner/' + sftp_server_candidate)
+
+        scp_candidates = find_artifacts(f"scp.*.{arch}.bin")
+        _, scp_candidate = match_distro_data(scp_candidates, distro)
+        scp_path = self.resolve_krunner_filepath('runner/' + scp_candidate)
+
+        jail_path: Optional[Path]
+        if self.local_config['container']['sandbox-type'] == 'jail':
+            jail_candidates = find_artifacts(f"jail.*.{arch}.bin")
+            _, jail_candidate = match_distro_data(jail_candidates, distro)
+            jail_path = self.resolve_krunner_filepath('runner/' + jail_candidate)
+        else:
+            jail_path = None
+
+        kernel_pkg_path = self.resolve_krunner_filepath('kernel')
+        helpers_pkg_path = self.resolve_krunner_filepath('helpers')
+        dropbear_path = self.resolve_krunner_filepath(f'runner/dropbear.{matched_libc_style}.{arch}.bin')
+        dropbearconv_path = \
+            self.resolve_krunner_filepath(f'runner/dropbearconvert.{matched_libc_style}.{arch}.bin')
+        dropbearkey_path = \
+            self.resolve_krunner_filepath(f'runner/dropbearkey.{matched_libc_style}.{arch}.bin')
+        tmux_path = self.resolve_krunner_filepath(f'runner/tmux.{matched_libc_style}.{arch}.bin')
+        dotfile_extractor_path = self.resolve_krunner_filepath('runner/extract_dotfiles.py')
+        persistent_files_warning_doc_path = \
+            self.resolve_krunner_filepath('runner/DO_NOT_STORE_PERSISTENT_FILES_HERE.md')
+        entrypoint_sh_path = self.resolve_krunner_filepath('runner/entrypoint.sh')
+
+        if matched_libc_style == 'musl':
+            terminfo_path = self.resolve_krunner_filepath('runner/terminfo.alpine3.8')
+            _mount(MountTypes.BIND, terminfo_path, '/home/work/.terminfo')
+
+        _mount(MountTypes.BIND, dotfile_extractor_path, '/opt/kernel/extract_dotfiles.py')
+        _mount(MountTypes.BIND, entrypoint_sh_path, '/opt/kernel/entrypoint.sh')
+        _mount(MountTypes.BIND, suexec_path, '/opt/kernel/su-exec')
+        if jail_path is not None:
+            _mount(MountTypes.BIND, jail_path, '/opt/kernel/jail')
+        _mount(MountTypes.BIND, hook_path, '/opt/kernel/libbaihook.so')
+        _mount(MountTypes.BIND, dropbear_path, '/opt/kernel/dropbear')
+        _mount(MountTypes.BIND, dropbearconv_path, '/opt/kernel/dropbearconvert')
+        _mount(MountTypes.BIND, dropbearkey_path, '/opt/kernel/dropbearkey')
+        _mount(MountTypes.BIND, tmux_path, '/opt/kernel/tmux')
+        _mount(MountTypes.BIND, sftp_server_path, '/usr/libexec/sftp-server')
+        _mount(MountTypes.BIND, scp_path, '/usr/bin/scp')
+        _mount(MountTypes.BIND, persistent_files_warning_doc_path,
+               '/home/work/DO_NOT_STORE_PERSISTENT_FILES_HERE.md')
+
+        _mount(MountTypes.VOLUME, krunner_volume, '/opt/backend.ai')
+        pylib_path = f'/opt/backend.ai/lib/python{krunner_pyver}/site-packages/'
+        _mount(MountTypes.BIND, kernel_pkg_path,
+                                pylib_path + 'ai/backend/kernel')
+        _mount(MountTypes.BIND, helpers_pkg_path,
+                                pylib_path + 'ai/backend/helpers')
+        environ['LD_PRELOAD'] = '/opt/kernel/libbaihook.so'
+
+        # Inject ComputeDevice-specific env-varibles and hooks
+        already_injected_hooks: Set[Path] = set()
+        for dev_type, device_alloc in resource_spec.allocations.items():
+            computer_set = self.computers[dev_type]
+            await self.apply_accelerator_allocation(
+                computer_set.instance, device_alloc,
+            )
+            alloc_sum = Decimal(0)
+            for dev_id, per_dev_alloc in device_alloc.items():
+                alloc_sum += sum(per_dev_alloc.values())
+            if alloc_sum > 0:
+                hook_paths = await computer_set.instance.get_hooks(distro, arch)
+                if hook_paths:
+                    log.debug('accelerator {} provides hooks: {}',
+                              type(computer_set.instance).__name__,
+                              ', '.join(map(str, hook_paths)))
+                for hook_path in map(lambda p: Path(p).absolute(), hook_paths):
+                    if hook_path in already_injected_hooks:
+                        continue
+                    container_hook_path = f"/opt/kernel/{hook_path.name}"
+                    _mount(MountTypes.BIND, hook_path, container_hook_path, is_unmanaged=True)
+                    environ['LD_PRELOAD'] += ':' + container_hook_path
+                    already_injected_hooks.add(hook_path)
 
 
-KernelCreationContextType = TypeVar('KernelCreationContextType', bound=KernelCreationContext)
-KernelObjectType = TypeVar('KernelObjectType', bound=AbstractKernel)
+KernelCreationContextType = TypeVar('KernelCreationContextType', bound=AbstractKernelCreationContext)
 
 
 @attr.s(auto_attribs=True, slots=True)
@@ -240,7 +554,6 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         ))
         self.stats_monitor = stats_monitor
         self.error_monitor = error_monitor
-        self._rx_distro = re.compile(r"\.([a-z-]+\d+\.\d+)\.")
         self._pending_creation_tasks = defaultdict(set)
         self._ongoing_exec_batch_tasks = weakref.WeakSet()
         self._ongoing_destruction_tasks = weakref.WeakValueDictionary()
@@ -883,351 +1196,15 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                      computer_name,
                      dict(computer_ctx.alloc_map.allocations))
 
-    async def create_kernel__init_context(
+    @abstractmethod
+    async def init_kernel_context(
         self,
         kernel_id: KernelId,
         kernel_config: KernelCreationConfig,
         *,
         restarting: bool = False,
-    ) -> KernelCreationContextType:
-        image_ref = ImageRef(
-            kernel_config['image']['canonical'],
-            [kernel_config['image']['registry']['name']],
-        )
-        image_labels = kernel_config['image']['labels']
-        version = int(image_labels.get('ai.backend.kernelspec', '1'))
-        kernel_features = frozenset(image_labels.get('ai.backend.features', '').split())
-        return cast(KernelCreationContextType, KernelCreationContext(
-            kspec_version=version,
-            kernel_features=kernel_features,
-            kernel_id=kernel_id,
-            kernel_config=kernel_config,
-            image_ref=image_ref,
-            internal_data=kernel_config['internal_data'] or {},
-            restarting=restarting,
-            cancellation_handlers=[],
-        ))
-
-    @abstractmethod
-    async def create_kernel__get_extra_envs(
-        self,
-        ctx: KernelCreationContextType,
-    ) -> Mapping[str, str]:
-        return {}
-
-    @abstractmethod
-    async def create_kernel__prepare_resource_spec(
-        self,
-        ctx: KernelCreationContextType,
-    ) -> Tuple[KernelResourceSpec, Optional[Mapping[str, Any]]]:
+    ) -> AbstractKernelCreationContext:
         raise NotImplementedError
-
-    @abstractmethod
-    async def create_kernel__prepare_scratch(
-        self,
-        ctx: KernelCreationContextType,
-    ) -> None:
-        pass
-
-    @abstractmethod
-    async def create_kernel__get_intrinsic_mounts(
-        self,
-        ctx: KernelCreationContextType,
-    ) -> Sequence[Mount]:
-        return []
-
-    @abstractmethod
-    async def create_kernel__apply_network(
-        self,
-        ctx: KernelCreationContextType,
-        cluster_info: ClusterInfo,
-    ) -> None:
-        """
-        Apply the given cluster network information to the deployment.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def create_kernel__install_ssh_keypair(
-        self,
-        ctx: KernelCreationContextType,
-        cluster_info: ClusterInfo,
-    ) -> None:
-        """
-        Install the ssh keypair inside the kernel from cluster_info.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def create_kernel__process_mounts(
-        self,
-        ctx: KernelCreationContextType,
-        mounts: Sequence[Mount],
-    ):
-        raise NotImplementedError
-
-    @abstractmethod
-    async def create_kernel__apply_accelerator_allocation(
-        self,
-        ctx: KernelCreationContextType,
-        computer,
-        device_alloc,
-    ) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def create_kernel__spawn(
-        self,
-        ctx: KernelCreationContextType,
-        resource_spec: KernelResourceSpec,
-        resource_opts,
-        environ: Mapping[str, str],
-        service_ports,
-        preopen_ports,
-        cmdargs: List[str],
-    ) -> KernelObjectType:
-        raise NotImplementedError
-
-    async def _create_kernel__mount_vfolders(
-        self,
-        ctx: KernelCreationContextType,
-        vfolders,
-        resource_spec: KernelResourceSpec,
-    ) -> None:
-        vfolder_mount_map: Mapping[str, str]
-        vfolder_mount_map = ctx.kernel_config.get('mount_map', {})
-        for vfolder in vfolders:
-            is_unmanaged = False
-            # TODO: update to use storage-proxy-provided mount path
-            if len(vfolder) == 5:
-                folder_name, folder_host, folder_id, folder_perm_literal, host_path_raw = \
-                    cast(MountTuple5, vfolder)
-                if host_path_raw:
-                    is_unmanaged = True
-                    host_path = Path(host_path_raw)
-                else:
-                    mount_path = Path(folder_id)
-                    if mount_path.is_absolute():
-                        # Use the storage proxy-provided path as-is.
-                        host_path = mount_path
-                    else:
-                        host_path = (self.local_config['vfolder']['mount'] / folder_host /
-                                     self.local_config['vfolder']['fsprefix'] / folder_id)
-            elif len(vfolder) == 4:  # for backward compatibility
-                folder_name, folder_host, folder_id, folder_perm_literal = \
-                    cast(MountTuple4, vfolder)
-                host_path = (self.local_config['vfolder']['mount'] / folder_host /
-                             self.local_config['vfolder']['fsprefix'] / folder_id)
-            elif len(vfolder) == 3:  # legacy managers
-                folder_name, folder_host, folder_id = cast(MountTuple3, vfolder)
-                folder_perm_literal = 'rw'
-                host_path = (self.local_config['vfolder']['mount'] / folder_host /
-                             self.local_config['vfolder']['fsprefix'] / folder_id)
-            else:
-                raise RuntimeError(
-                    'Unexpected number of vfolder mount detail tuple size')
-            if ctx.internal_data.get('prevent_vfolder_mounts', False):
-                # Only allow mount of ".logs" directory to prevent expose
-                # internal-only information, such as Docker credentials to user's ".docker" vfolder
-                # in image importer kernels.
-                if folder_name != '.logs':
-                    continue
-            if kernel_path_raw := vfolder_mount_map.get(folder_name):
-                if not kernel_path_raw.startswith('/home/work/'):  # type: ignore
-                    raise ValueError(
-                        f'Error while mounting {folder_name} to {kernel_path_raw}: '
-                        'all vfolder mounts should be under /home/work')
-                kernel_path = Path(kernel_path_raw)  # type: ignore
-            else:
-                kernel_path = Path(f'/home/work/{folder_name}')
-            folder_perm = MountPermission(folder_perm_literal)
-            mount = Mount(
-                MountTypes.BIND,
-                host_path,
-                kernel_path,
-                folder_perm,
-                is_unmanaged=is_unmanaged,
-            )
-            resource_spec.mounts.append(mount)
-
-    @cached(
-        cache=LRUCache(maxsize=32),  # type: ignore
-        key=lambda self, ctx: (
-            ctx.image_ref,
-            ctx.kernel_config['image']['labels'].get('ai.backend.base-distro', 'ubuntu16.04'),
-        ),
-    )
-    def _create_kernel__get_krunner_info(
-        self,
-        ctx: KernelCreationContextType,
-    ) -> Tuple[str, str, str, str, str]:
-        image_labels = ctx.kernel_config['image']['labels']
-        distro = image_labels.get('ai.backend.base-distro', 'ubuntu16.04')
-        matched_distro, krunner_volume = match_distro_data(
-            self.local_config['container']['krunner-volumes'], distro)
-        matched_libc_style = 'glibc'
-        if distro.startswith('alpine'):
-            matched_libc_style = 'musl'
-        krunner_pyver = '3.6'  # fallback
-        if m := re.search(r'^([a-z-]+)(\d+(\.\d+)*)?$', matched_distro):
-            matched_distro_pkgname = m.group(1).replace('-', '_')
-            try:
-                krunner_pyver = Path(pkg_resources.resource_filename(
-                    f'ai.backend.krunner.{matched_distro_pkgname}',
-                    f'krunner-python.{matched_distro}.txt',
-                )).read_text().strip()
-            except FileNotFoundError:
-                pass
-        log.debug('selected krunner: {}', matched_distro)
-        log.debug('selected libc style: {}', matched_libc_style)
-        log.debug('krunner volume: {}', krunner_volume)
-        log.debug('krunner python: {}', krunner_pyver)
-        arch = get_arch_name()
-        return arch, matched_distro, matched_libc_style, krunner_volume, krunner_pyver
-
-    async def _create_kernel__mount_krunner(
-        self,
-        ctx: KernelCreationContextType,
-        resource_spec: KernelResourceSpec,
-        environ: MutableMapping[str, str],
-    ) -> None:
-
-        def _mount(
-            type: MountTypes,
-            src: Union[str, Path],
-            target: Union[str, Path],
-            perm: Literal['ro', 'rw'] = 'ro',
-            is_unmanaged: bool = False,
-            opts: Mapping[str, Any] = None,
-        ) -> None:
-            resource_spec.mounts.append(
-                Mount(type, Path(src), Path(target),
-                      MountPermission(perm),
-                      is_unmanaged=is_unmanaged,
-                      opts=opts)
-            )
-
-        # Inject Backend.AI kernel runner dependencies.
-        image_labels = ctx.kernel_config['image']['labels']
-        distro = image_labels.get('ai.backend.base-distro', 'ubuntu16.04')
-
-        arch, matched_distro, matched_libc_style, krunner_volume, krunner_pyver = \
-            self._create_kernel__get_krunner_info(ctx)
-        entrypoint_sh_path = Path(pkg_resources.resource_filename(
-            'ai.backend.agent', '../runner/entrypoint.sh'))
-        artifact_path = entrypoint_sh_path.parent
-
-        def find_artifacts(pattern: str) -> Mapping[str, str]:
-            artifacts = {}
-            for p in artifact_path.glob(pattern):
-                m = self._rx_distro.search(p.name)
-                if m is not None:
-                    artifacts[m.group(1)] = p.name
-            return artifacts
-
-        suexec_candidates = find_artifacts(f"su-exec.*.{arch}.bin")
-        _, suexec_candidate = match_distro_data(suexec_candidates, distro)
-        suexec_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', suexec_candidate))
-
-        hook_candidates = find_artifacts(f"libbaihook.*.{arch}.so")
-        _, hook_candidate = match_distro_data(hook_candidates, distro)
-        hook_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', hook_candidate))
-
-        sftp_server_candidates = find_artifacts(f"sftp-server.*.{arch}.bin")
-        _, sftp_server_candidate = match_distro_data(sftp_server_candidates, distro)
-        sftp_server_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', sftp_server_candidate))
-
-        scp_candidates = find_artifacts(f"scp.*.{arch}.bin")
-        _, scp_candidate = match_distro_data(scp_candidates, distro)
-        scp_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', scp_candidate))
-
-        jail_path: Optional[Path]
-        if self.local_config['container']['sandbox-type'] == 'jail':
-            jail_candidates = find_artifacts(f"jail.*.{arch}.bin")
-            _, jail_candidate = match_distro_data(jail_candidates, distro)
-            jail_path = Path(pkg_resources.resource_filename(
-                'ai.backend.runner', jail_candidate))
-        else:
-            jail_path = None
-
-        kernel_pkg_path = Path(pkg_resources.resource_filename(
-            'ai.backend.agent', '')).parent / 'kernel'
-        helpers_pkg_path = Path(pkg_resources.resource_filename(
-            'ai.backend.agent', '')).parent / 'helpers'
-        dropbear_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner',
-            f'dropbear.{matched_libc_style}.{arch}.bin'))
-        dropbearconv_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner',
-            f'dropbearconvert.{matched_libc_style}.{arch}.bin'))
-        dropbearkey_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner',
-            f'dropbearkey.{matched_libc_style}.{arch}.bin'))
-        tmux_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', f'tmux.{matched_libc_style}.{arch}.bin'))
-        dotfile_extractor_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', 'extract_dotfiles.py'
-        ))
-        persistent_files_warning_doc_path = Path(pkg_resources.resource_filename(
-            'ai.backend.runner', 'DO_NOT_STORE_PERSISTENT_FILES_HERE.md'
-        ))
-
-        if matched_libc_style == 'musl':
-            terminfo_path = Path(pkg_resources.resource_filename(
-                'ai.backend.runner', 'terminfo.alpine3.8'
-            ))
-            _mount(MountTypes.BIND, terminfo_path.resolve(), '/home/work/.terminfo')
-
-        _mount(MountTypes.BIND, dotfile_extractor_path.resolve(), '/opt/kernel/extract_dotfiles.py')
-        _mount(MountTypes.BIND, entrypoint_sh_path.resolve(), '/opt/kernel/entrypoint.sh')
-        _mount(MountTypes.BIND, suexec_path.resolve(), '/opt/kernel/su-exec')
-        if jail_path is not None:
-            _mount(MountTypes.BIND, jail_path.resolve(), '/opt/kernel/jail')
-        _mount(MountTypes.BIND, hook_path.resolve(), '/opt/kernel/libbaihook.so')
-        _mount(MountTypes.BIND, dropbear_path.resolve(), '/opt/kernel/dropbear')
-        _mount(MountTypes.BIND, dropbearconv_path.resolve(), '/opt/kernel/dropbearconvert')
-        _mount(MountTypes.BIND, dropbearkey_path.resolve(), '/opt/kernel/dropbearkey')
-        _mount(MountTypes.BIND, tmux_path.resolve(), '/opt/kernel/tmux')
-        _mount(MountTypes.BIND, sftp_server_path.resolve(), '/usr/libexec/sftp-server')
-        _mount(MountTypes.BIND, scp_path.resolve(), '/usr/bin/scp')
-        _mount(MountTypes.BIND, persistent_files_warning_doc_path.resolve(),
-               '/home/work/DO_NOT_STORE_PERSISTENT_FILES_HERE.md')
-
-        _mount(MountTypes.VOLUME, krunner_volume, '/opt/backend.ai')
-        pylib_path = f'/opt/backend.ai/lib/python{krunner_pyver}/site-packages/'
-        _mount(MountTypes.BIND, kernel_pkg_path.resolve(),
-                                pylib_path + 'ai/backend/kernel')
-        _mount(MountTypes.BIND, helpers_pkg_path.resolve(),
-                                pylib_path + 'ai/backend/helpers')
-        environ['LD_PRELOAD'] = '/opt/kernel/libbaihook.so'
-
-        # Inject ComputeDevice-specific env-varibles and hooks
-        already_injected_hooks: Set[Path] = set()
-        for dev_type, device_alloc in resource_spec.allocations.items():
-            computer_set = self.computers[dev_type]
-            await self.create_kernel__apply_accelerator_allocation(
-                ctx, computer_set.instance, device_alloc,
-            )
-            alloc_sum = Decimal(0)
-            for dev_id, per_dev_alloc in device_alloc.items():
-                alloc_sum += sum(per_dev_alloc.values())
-            if alloc_sum > 0:
-                hook_paths = await computer_set.instance.get_hooks(distro, arch)
-                if hook_paths:
-                    log.debug('accelerator {} provides hooks: {}',
-                              type(computer_set.instance).__name__,
-                              ', '.join(map(str, hook_paths)))
-                for hook_path in map(lambda p: Path(p).absolute(), hook_paths):
-                    if hook_path in already_injected_hooks:
-                        continue
-                    container_hook_path = f"/opt/kernel/{hook_path.name}"
-                    _mount(MountTypes.BIND, hook_path, container_hook_path, is_unmanaged=True)
-                    environ['LD_PRELOAD'] += ':' + container_hook_path
-                    already_injected_hooks.add(hook_path)
 
     async def execute_batch(
         self,
@@ -1306,7 +1283,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         # Initialize the creation context
         if self.local_config['debug']['log-kernel-config']:
             log.debug('Kernel creation config: {0}', pretty(kernel_config))
-        ctx = await self.create_kernel__init_context(
+        ctx = await self.init_kernel_context(
             kernel_id, kernel_config,
             restarting=restarting,
         )
@@ -1319,7 +1296,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             environ['LOCAL_USER_ID'] = str(uid)
             environ['LOCAL_GROUP_ID'] = str(gid)
         environ.update(
-            await self.create_kernel__get_extra_envs(ctx)
+            await ctx.get_extra_envs()
         )
         image_labels = kernel_config['image']['labels']
 
@@ -1342,14 +1319,14 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
 
         # Get the resource spec from existing kernel scratches
         # or create a new resource spec from ctx.kernel_config
-        resource_spec, resource_opts = await self.create_kernel__prepare_resource_spec(ctx)
+        resource_spec, resource_opts = await ctx.prepare_resource_spec()
         # When creating a new kernel,
         # we need to allocate agent resources, prepare the networks,
         # adn specify the container mounts.
 
         # Mount backend-specific intrinsic mounts (e.g., scratch directories)
         resource_spec.mounts.extend(
-            await self.create_kernel__get_intrinsic_mounts(ctx)
+            await ctx.get_intrinsic_mounts()
         )
 
         # Realize ComputeDevice (including accelerators) allocations.
@@ -1384,15 +1361,15 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                         raise
 
         # Prepare scratch spaces and dotfiles inside it.
-        await self.create_kernel__prepare_scratch(ctx)
+        await ctx.prepare_scratch()
 
         # Prepare networking.
-        await self.create_kernel__apply_network(ctx, cluster_info)
-        await self.create_kernel__install_ssh_keypair(ctx, cluster_info)
+        await ctx.apply_network(cluster_info)
+        await ctx.install_ssh_keypair(cluster_info)
 
         # Mount vfolders and krunner stuffs.
-        await self._create_kernel__mount_vfolders(ctx, kernel_config['mounts'], resource_spec)
-        await self._create_kernel__mount_krunner(ctx, resource_spec, environ)
+        await ctx.mount_vfolders(kernel_config['mounts'], resource_spec)
+        await ctx.mount_krunner(resource_spec, environ)
 
         # Inject Backend.AI-intrinsic env-variables for libbaihook and gosu
         label_envs_corecount = image_labels.get('ai.backend.envs.corecount', '')
@@ -1401,10 +1378,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         environ.update({k: str(cpu_core_count) for k in envs_corecount if k not in environ})
 
         # Realize mounts.
-        await self.create_kernel__process_mounts(
-            ctx,
-            resource_spec.mounts,
-        )
+        await ctx.process_mounts(resource_spec.mounts)
 
         # Get attached devices information (including model_name).
         attached_devices = {}
@@ -1484,8 +1458,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         if self.local_config['debug']['log-kernel-config']:
             log.info('kernel starting with resource spec: \n{0}',
                      pretty(attr.asdict(resource_spec)))
-        kernel_obj = await self.create_kernel__spawn(
-            ctx,
+        kernel_obj: KernelObjectType = await ctx.spawn(
             resource_spec,
             resource_opts,
             environ,

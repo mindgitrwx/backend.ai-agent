@@ -116,7 +116,6 @@ python -m ai.backend.manager.cli fixture populate sample-configs/example-resourc
 
 cd ..
 cd agent
-git checkout feature/code-abstraction
 git lfs install
 git lfs pull
 pyenv local venv-agent

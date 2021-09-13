@@ -54,10 +54,7 @@ from .agent import AbstractAgent
 from .config import (
     agent_local_config_iv,
     agent_etcd_config_iv,
-    k8s_extra_config_iv,
     docker_extra_config_iv,
-    registry_local_config_iv,
-    registry_ecr_config_iv,
     container_etcd_config_iv,
 )
 from .exception import ResourceError
@@ -691,18 +688,10 @@ def main(
     try:
         cfg = config.check(raw_cfg, agent_local_config_iv)
         if cfg['agent']['backend'] == AgentBackend.KUBERNETES:
-            cfg = config.check(raw_cfg, k8s_extra_config_iv)
-            if cfg['registry']['type'] == 'local':
-                registry_target_config_iv = registry_local_config_iv
-            elif cfg['registry']['type'] == 'ecr':
-                registry_target_config_iv = registry_ecr_config_iv
-            else:
-                print('Validation of agent configuration has failed: registry type {} not supported'
-                    .format(cfg['registry']['type']), file=sys.stderr)
-                raise click.Abort()
-
-            registry_cfg = config.check(cfg['registry'], registry_target_config_iv)
-            cfg['registry'] = registry_cfg
+            if cfg['container']['scratch-type'] == 'k8s-nfs' and \
+                    (cfg['container']['scratch-nfs-address'] is None
+                        or cfg['container']['scratch-nfs-options'] is None):
+                raise ValueError('scratch-nfs-address and scratch-nfs-options are required for k8s-nfs')
         if cfg['agent']['backend'] == AgentBackend.DOCKER:
             config.check(raw_cfg, docker_extra_config_iv)
         if 'debug' in cfg and cfg['debug']['enabled']:

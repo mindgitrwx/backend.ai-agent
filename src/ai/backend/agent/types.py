@@ -17,7 +17,7 @@ from ai.backend.common.types import (
 class AgentBackend(enum.Enum):
     # The list of importable backend names under "ai.backend.agent" pkg namespace.
     DOCKER = 'docker'
-    KUBERNETES = 'k8s'
+    KUBERNETES = 'kubernetes'
 
 
 @attr.s(auto_attribs=True, slots=True)

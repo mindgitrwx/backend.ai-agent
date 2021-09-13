@@ -21,19 +21,21 @@ from typing import (
     FrozenSet,
     Dict,
     List,
+    Literal,
     Mapping,
     MutableMapping,
     Optional,
     Sequence,
+    Set,
     Tuple,
     TYPE_CHECKING,
+    Union,
 )
 
 from aiodocker.docker import Docker, DockerContainer
 from aiodocker.exceptions import DockerError, DockerContainerError
 import aiotools
 from async_timeout import timeout
-import attr
 import zmq
 
 from ai.backend.common.docker import (
@@ -73,8 +75,9 @@ from ..resources import (
 )
 from ..agent import (
     AbstractAgent,
-    KernelCreationContext,
+    AbstractKernelCreationContext,
     ACTIVE_STATUS_SET,
+    ComputerContext,
     ipc_base_path,
 )
 from ..proxy import proxy_connection, DomainSocketProxy
@@ -140,15 +143,643 @@ def _DockerContainerError_reduce(self):
     )
 
 
-@attr.s(auto_attribs=True, slots=True)
-class DockerKernelCreationContext(KernelCreationContext):
+class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
+
     scratch_dir: Path
     tmp_dir: Path
     config_dir: Path
     work_dir: Path
-    container_configs: List[Mapping[str, Any]]
-    domain_socket_proxies: List[DomainSocketProxy]
-    computer_docker_args: Dict[str, Any]
+    docker: Docker
+    container_configs: List[Mapping[str, Any]] = []
+    domain_socket_proxies: List[DomainSocketProxy] = []
+    computer_docker_args: Dict[str, Any] = {}
+    port_pool: Set[int]
+    agent_sockpath: Path
+    resource_lock: asyncio.Lock
+
+    def __init__(
+        self,
+        kernel_id: KernelId,
+        kernel_config: KernelCreationConfig,
+        local_config: Mapping[str, Any],
+        computers: MutableMapping[str, ComputerContext],
+        port_pool: Set[int],
+        agent_sockpath: Path,
+        resource_lock: asyncio.Lock,
+        docker: Docker,
+        restarting: bool = False
+    ):
+        super().__init__(kernel_id, kernel_config, local_config, computers, restarting=restarting)
+        scratch_dir = (self.local_config['container']['scratch-root'] / str(kernel_id)).resolve()
+        tmp_dir = (self.local_config['container']['scratch-root'] / f'{kernel_id}_tmp').resolve()
+
+        self.scratch_dir = scratch_dir
+        self.tmp_dir = tmp_dir
+        self.config_dir = scratch_dir / 'config'
+        self.work_dir = scratch_dir / 'work'
+
+        self.docker = docker
+        self.port_pool = port_pool
+        self.agent_sockpath = agent_sockpath
+        self.resource_lock = resource_lock
+
+    def _kernel_resource_spec_read(self, filename):
+        with open(filename, 'r') as f:
+            resource_spec = KernelResourceSpec.read_from_file(f)
+        return resource_spec
+
+    async def get_extra_envs(self) -> Mapping[str, str]:
+        return {}
+
+    async def prepare_resource_spec(self) -> Tuple[KernelResourceSpec, Optional[Mapping[str, Any]]]:
+        loop = current_loop()
+        if self.restarting:
+            resource_spec = await loop.run_in_executor(
+                None,
+                self._kernel_resource_spec_read,
+                self.config_dir / 'resource.txt')
+            resource_opts = None
+        else:
+            slots = ResourceSlot.from_json(self.kernel_config['resource_slots'])
+            # Ensure that we have intrinsic slots.
+            assert SlotName('cpu') in slots
+            assert SlotName('mem') in slots
+            # accept unknown slot type with zero values
+            # but reject if they have non-zero values.
+            for st, sv in slots.items():
+                if st not in known_slot_types and sv != Decimal(0):
+                    raise UnsupportedResource(st)
+            # sanitize the slots
+            current_resource_slots.set(known_slot_types)
+            slots = slots.normalize_slots(ignore_unknown=True)
+            resource_spec = KernelResourceSpec(
+                container_id='',
+                allocations={},
+                slots={**slots},  # copy
+                mounts=[],
+                scratch_disk_size=0,  # TODO: implement (#70)
+            )
+            resource_opts = self.kernel_config.get('resource_opts', {})
+        return resource_spec, resource_opts
+
+    async def prepare_scratch(self) -> None:
+        loop = current_loop()
+
+        # Create the scratch, config, and work directories.
+        if (
+            sys.platform.startswith('linux')
+            and self.local_config['container']['scratch-type'] == 'memory'
+        ):
+            await loop.run_in_executor(None, partial(self.tmp_dir.mkdir, exist_ok=True))
+            await create_scratch_filesystem(self.scratch_dir, 64)
+            await create_scratch_filesystem(self.tmp_dir, 64)
+        else:
+            await loop.run_in_executor(None, partial(self.scratch_dir.mkdir, exist_ok=True))
+
+        def _create_scratch_dirs():
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+
+        await loop.run_in_executor(None, _create_scratch_dirs)
+
+        if not self.restarting:
+            # Since these files are bind-mounted inside a bind-mounted directory,
+            # we need to touch them first to avoid their "ghost" files are created
+            # as root in the host-side filesystem, which prevents deletion of scratch
+            # directories when the agent is running as non-root.
+            def _clone_dotfiles():
+                jupyter_custom_css_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', 'jupyter-custom.css'))
+                logo_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', 'logo.svg'))
+                font_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', 'roboto.ttf'))
+                font_italic_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', 'roboto-italic.ttf'))
+                bashrc_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', '.bashrc'))
+                bash_profile_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', '.bash_profile'))
+                vimrc_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', '.vimrc'))
+                tmux_conf_path = Path(pkg_resources.resource_filename(
+                    'ai.backend.runner', '.tmux.conf'))
+                jupyter_custom_dir = (self.work_dir / '.jupyter' / 'custom')
+                jupyter_custom_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(jupyter_custom_css_path.resolve(), jupyter_custom_dir / 'custom.css')
+                shutil.copy(logo_path.resolve(), jupyter_custom_dir / 'logo.svg')
+                shutil.copy(font_path.resolve(), jupyter_custom_dir / 'roboto.ttf')
+                shutil.copy(font_italic_path.resolve(), jupyter_custom_dir / 'roboto-italic.ttf')
+                shutil.copy(bashrc_path.resolve(), self.work_dir / '.bashrc')
+                shutil.copy(bash_profile_path.resolve(), self.work_dir / '.bash_profile')
+                shutil.copy(vimrc_path.resolve(), self.work_dir / '.vimrc')
+                shutil.copy(tmux_conf_path.resolve(), self.work_dir / '.tmux.conf')
+                if KernelFeatures.UID_MATCH in self.kernel_features:
+                    uid = self.local_config['container']['kernel-uid']
+                    gid = self.local_config['container']['kernel-gid']
+                    if os.geteuid() == 0:  # only possible when I am root.
+                        os.chown(self.work_dir, uid, gid)
+                        os.chown(self.work_dir / '.jupyter', uid, gid)
+                        os.chown(self.work_dir / '.jupyter' / 'custom', uid, gid)
+                        os.chown(self.work_dir / '.bashrc', uid, gid)
+                        os.chown(self.work_dir / '.bash_profile', uid, gid)
+                        os.chown(self.work_dir / '.vimrc', uid, gid)
+                        os.chown(self.work_dir / '.tmux.conf', uid, gid)
+
+            await loop.run_in_executor(None, _clone_dotfiles)
+
+    async def get_intrinsic_mounts(self) -> Sequence[Mount]:
+        loop = current_loop()
+
+        # scratch/config/tmp mounts
+        mounts: List[Mount] = [
+            Mount(MountTypes.BIND, self.config_dir, Path("/home/config"),
+                  MountPermission.READ_ONLY),
+            Mount(MountTypes.BIND, self.work_dir, Path("/home/work"),
+                  MountPermission.READ_WRITE),
+        ]
+        if (sys.platform.startswith("linux") and
+            self.local_config["container"]["scratch-type"] == "memory"):
+            mounts.append(Mount(
+                MountTypes.BIND,
+                self.tmp_dir,
+                Path("/tmp"),
+                MountPermission.READ_WRITE,
+            ))
+
+        # lxcfs mounts
+        lxcfs_root = Path("/var/lib/lxcfs")
+        if lxcfs_root.is_dir():
+            mounts.extend(
+                Mount(
+                    MountTypes.BIND,
+                    lxcfs_proc_path,
+                    "/" / lxcfs_proc_path.relative_to(lxcfs_root),
+                    MountPermission.READ_WRITE,
+                )
+                for lxcfs_proc_path in (lxcfs_root / "proc").iterdir()
+            )
+            mounts.extend(
+                Mount(
+                    MountTypes.BIND,
+                    lxcfs_root / path,
+                    "/" / Path(path),
+                    MountPermission.READ_WRITE,
+                )
+                for path in [
+                    "sys/devices/system/cpu",
+                    "sys/devices/system/cpu/online",
+                ]
+                if Path(lxcfs_root / path).exists()
+            )
+
+        # extra mounts
+        extra_mount_list = await get_extra_volumes(self.docker, self.image_ref.short)
+        mounts.extend(Mount(MountTypes.VOLUME, v.name, v.container_path, v.mode)
+                      for v in extra_mount_list)
+
+        # debug mounts
+        if self.local_config['debug']['coredump']['enabled']:
+            mounts.append(Mount(
+                MountTypes.BIND,
+                self.local_config['debug']['coredump']['path'],
+                self.local_config['debug']['coredump']['core_path'],
+                MountPermission.READ_WRITE,
+            ))
+
+        # agent-socket mount
+        mounts.append(Mount(
+            MountTypes.BIND,
+            self.agent_sockpath,
+            Path('/opt/kernel/agent.sock'),
+            MountPermission.READ_WRITE,
+        ))
+
+        # domain-socket proxy mount
+        # (used for special service containers such image importer)
+        for host_sock_path in self.internal_data.get('domain_socket_proxies', []):
+            await loop.run_in_executor(
+                None,
+                partial((ipc_base_path / 'proxy').mkdir, parents=True, exist_ok=True))
+            host_proxy_path = ipc_base_path / 'proxy' / f'{secrets.token_hex(12)}.sock'
+            proxy_server = await asyncio.start_unix_server(
+                aiotools.apartial(proxy_connection, host_sock_path),
+                str(host_proxy_path))
+            await loop.run_in_executor(None, host_proxy_path.chmod, 0o666)
+            self.domain_socket_proxies.append(DomainSocketProxy(
+                Path(host_sock_path),
+                host_proxy_path,
+                proxy_server,
+            ))
+            mounts.append(Mount(
+                MountTypes.BIND,
+                host_proxy_path,
+                host_sock_path,
+                MountPermission.READ_WRITE,
+            ))
+
+        return mounts
+
+    def resolve_krunner_filepath(self, filename) -> Path:
+        return Path(pkg_resources.resource_filename(
+            'ai.backend.agent', '../' + filename)).resolve()
+
+    def get_runner_mount(
+        self,
+        type: MountTypes,
+        src: Union[str, Path],
+        target: Union[str, Path],
+        perm: Literal['ro', 'rw'] = 'ro',
+        is_unmanaged: bool = False,
+        opts: Mapping[str, Any] = None
+    ) -> Mount:
+        return Mount(
+                type, Path(src), Path(target),
+                MountPermission(perm),
+                is_unmanaged=is_unmanaged,
+                opts=opts
+               )
+
+    async def apply_network(self, cluster_info: ClusterInfo) -> None:
+        if cluster_info['network_name'] is not None:
+            self.container_configs.append({
+                'HostConfig': {
+                    'NetworkMode': cluster_info['network_name'],
+                },
+                'NetworkingConfig': {
+                    'EndpointsConfig': {
+                        cluster_info['network_name']: {
+                            'Aliases': [self.kernel_config['cluster_hostname']],
+                        },
+                    },
+                },
+            })
+            # RDMA mounts
+            ib_root = Path("/dev/infiniband")
+            if ib_root.is_dir() and (ib_root / "uverbs0").exists():
+                self.container_configs.append({
+                    'HostConfig': {
+                        'Devices': [
+                            {
+                                'PathOnHost': "/dev/infiniband",
+                                'PathInContainer': "/dev/infiniband",
+                                'CgroupPermissions': "rwm",
+                            },
+                        ],
+                    },
+                })
+
+    async def install_ssh_keypair(self, cluster_info: ClusterInfo) -> None:
+        sshkey = cluster_info['ssh_keypair']
+        if sshkey is None:
+            return
+
+        def _write_keypair():
+            try:
+                priv_key_path = (self.config_dir / 'ssh' / 'id_cluster')
+                pub_key_path = (self.config_dir / 'ssh' / 'id_cluster.pub')
+                priv_key_path.parent.mkdir(parents=True, exist_ok=True)
+                priv_key_path.write_text(sshkey['private_key'])
+                pub_key_path.write_text(sshkey['public_key'])
+                if KernelFeatures.UID_MATCH in self.kernel_features:
+                    uid = self.local_config['container']['kernel-uid']
+                    gid = self.local_config['container']['kernel-gid']
+                    if os.geteuid() == 0:  # only possible when I am root.
+                        os.chown(str(priv_key_path), uid, gid)
+                        os.chown(str(pub_key_path), uid, gid)
+                priv_key_path.chmod(0o600)
+            except Exception:
+                log.exception('error while writing cluster keypair')
+
+        current_loop().run_in_executor(None, _write_keypair)  # ???
+
+    async def process_mounts(self, mounts: Sequence[Mount]):
+        def fix_unsupported_perm(folder_perm: MountPermission) -> MountPermission:
+            if folder_perm == MountPermission.RW_DELETE:
+                # TODO: enforce readable/writable but not deletable
+                # (Currently docker's READ_WRITE includes DELETE)
+                return MountPermission.READ_WRITE
+            return folder_perm
+
+        container_config = {
+            'HostConfig': {
+                'Mounts': [
+                    {
+                        'Target': str(mount.target),
+                        'Source': str(mount.source),
+                        'Type': mount.type.value,
+                        'ReadOnly': fix_unsupported_perm(mount.permission) == MountPermission.READ_ONLY,
+                        f'{mount.type.value.capitalize()}Options':
+                            mount.opts if mount.opts else {},
+                    }
+                    for mount in mounts
+                ],
+            }
+        }
+        self.container_configs.append(container_config)
+
+    async def apply_accelerator_allocation(self, computer, device_alloc) -> None:
+        update_nested_dict(
+            self.computer_docker_args,
+            await computer.generate_docker_args(self.docker, device_alloc))
+
+    async def spawn(
+        self,
+        resource_spec: KernelResourceSpec,
+        resource_opts,
+        environ: Mapping[str, str],
+        service_ports,
+        preopen_ports,
+        cmdargs: List[str]
+    ) -> DockerKernel:
+        loop = current_loop()
+        image_labels = self.kernel_config['image']['labels']
+        exposed_ports = [2000, 2001]
+        for sport in service_ports:
+            exposed_ports.extend(sport['container_ports'])
+
+        if self.restarting:
+            pass
+        else:
+            # Create bootstrap.sh into workdir if needed
+            if bootstrap := self.kernel_config.get('bootstrap_script'):
+
+                def _write_user_bootstrap_script():
+                    (self.work_dir / 'bootstrap.sh').write_text(bootstrap)
+                    if KernelFeatures.UID_MATCH in self.kernel_features:
+                        uid = self.local_config['container']['kernel-uid']
+                        gid = self.local_config['container']['kernel-gid']
+                        if os.geteuid() == 0:
+                            os.chown(self.work_dir / 'bootstrap.sh', uid, gid)
+
+                await loop.run_in_executor(None, _write_user_bootstrap_script)
+
+            with StringIO() as buf:
+                for k, v in environ.items():
+                    buf.write(f'{k}={v}\n')
+                accel_envs = self.computer_docker_args.get('Env', [])
+                for env in accel_envs:
+                    buf.write(f'{env}\n')
+                await loop.run_in_executor(
+                    None,
+                    (self.config_dir / 'environ.txt').write_bytes,
+                    buf.getvalue().encode('utf8'),
+                )
+
+            with StringIO() as buf:
+                resource_spec.write_to_file(buf)
+                for dev_type, device_alloc in resource_spec.allocations.items():
+                    computer_self = self.computers[dev_type]
+                    kvpairs = \
+                        await computer_self.instance.generate_resource_data(device_alloc)
+                    for k, v in kvpairs.items():
+                        buf.write(f'{k}={v}\n')
+                await loop.run_in_executor(
+                    None,
+                    (self.config_dir / 'resource.txt').write_bytes,
+                    buf.getvalue().encode('utf8'),
+                )
+
+            docker_creds = self.internal_data.get('docker_credentials')
+            if docker_creds:
+                await loop.run_in_executor(
+                    None,
+                    (self.config_dir / 'docker-creds.json').write_text,
+                    json.dumps(docker_creds))
+
+        # TODO: refactor out dotfiles/sshkey initialization to the base agent?
+
+        shutil.copyfile(self.config_dir / 'environ.txt', self.config_dir / 'environ_base.txt')
+        shutil.copyfile(self.config_dir / 'resource.txt', self.config_dir / 'resource_base.txt')
+        # Create SSH keypair only if ssh_keypair internal_data exists and
+        # /home/work/.ssh folder is not mounted.
+        if self.internal_data.get('ssh_keypair'):
+            for mount in resource_spec.mounts:
+                container_path = str(mount).split(':')[1]
+                if container_path == '/home/work/.ssh':
+                    break
+            else:
+                pubkey = self.internal_data['ssh_keypair']['public_key'].encode('ascii')
+                privkey = self.internal_data['ssh_keypair']['private_key'].encode('ascii')
+                ssh_dir = self.work_dir / '.ssh'
+
+                def _populate_ssh_config():
+                    ssh_dir.mkdir(parents=True, exist_ok=True)
+                    ssh_dir.chmod(0o700)
+                    (ssh_dir / 'authorized_keys').write_bytes(pubkey)
+                    (ssh_dir / 'authorized_keys').chmod(0o600)
+                    (self.work_dir / 'id_container').write_bytes(privkey)
+                    (self.work_dir / 'id_container').chmod(0o600)
+                    if KernelFeatures.UID_MATCH in self.kernel_features:
+                        uid = self.local_config['container']['kernel-uid']
+                        gid = self.local_config['container']['kernel-gid']
+                        if os.geteuid() == 0:  # only possible when I am root.
+                            os.chown(ssh_dir, uid, gid)
+                            os.chown(ssh_dir / 'authorized_keys', uid, gid)
+                            os.chown(self.work_dir / 'id_container', uid, gid)
+
+                await loop.run_in_executor(None, _populate_ssh_config)
+
+        # higher priority dotfiles are stored last to support overwriting
+        for dotfile in self.internal_data.get('dotfiles', []):
+            if dotfile['path'].startswith('/'):
+                if dotfile['path'].startswith('/home/'):
+                    path_arr = dotfile['path'].split('/')
+                    file_path: Path = self.scratch_dir / '/'.join(path_arr[2:])
+                else:
+                    file_path = Path(dotfile['path'])
+            else:
+                file_path = self.work_dir / dotfile['path']
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            await loop.run_in_executor(
+                None,
+                file_path.write_text,
+                dotfile['data'])
+
+            tmp = Path(file_path)
+            while tmp != self.work_dir:
+                tmp.chmod(int(dotfile['perm'], 8))
+                # only possible when I am root.
+                if KernelFeatures.UID_MATCH in self.kernel_features and os.geteuid() == 0:
+                    uid = self.local_config['container']['kernel-uid']
+                    gid = self.local_config['container']['kernel-gid']
+                    os.chown(tmp, uid, gid)
+                tmp = tmp.parent
+
+        # PHASE 4: Run!
+        kernel_host = self.local_config['container']['kernel-host']
+        if len(exposed_ports) > len(self.port_pool):
+            raise RuntimeError('Container ports are not sufficiently available.')
+        host_ports = []
+        for eport in exposed_ports:
+            hport = self.port_pool.pop()
+            host_ports.append(hport)
+
+        container_log_size = self.local_config['agent']['container-logs']['max-length']
+        container_log_file_count = 5
+        container_log_file_size = BinarySize(container_log_size // container_log_file_count)
+        container_config: MutableMapping[str, Any] = {
+            'Image': self.image_ref.canonical,
+            'Tty': True,
+            'OpenStdin': True,
+            'Privileged': False,
+            'StopSignal': 'SIGINT',
+            'ExposedPorts': {
+                f'{port}/tcp': {} for port in exposed_ports
+            },
+            'EntryPoint': ["/opt/kernel/entrypoint.sh"],
+            'Cmd': cmdargs,
+            'Env': [f'{k}={v}' for k, v in environ.items()],
+            'WorkingDir': "/home/work",
+            'Hostname': self.kernel_config['cluster_hostname'],
+            'Labels': {
+                'ai.backend.kernel-id': str(self.kernel_id),
+                'ai.backend.internal.block-service-ports':
+                    '1' if self.internal_data.get('block_service_ports', False) else '0'
+            },
+            'HostConfig': {
+                'Init': True,
+                'PortBindings': {
+                    f'{eport}/tcp': [{'HostPort': str(hport),
+                                      'HostIp': str(kernel_host)}]
+                    for eport, hport in zip(exposed_ports, host_ports)
+                },
+                'PublishAllPorts': False,  # we manage port mapping manually!
+                'CapAdd': [
+                    'IPC_LOCK',  # for hugepages and RDMA
+                ],
+                'Ulimits': [
+                    {"Name": "nofile", "Soft": 1048576, "Hard": 1048576},
+                    {"Name": "memlock", "Soft": -1, "Hard": -1},
+                ],
+                'LogConfig': {
+                    'Type': 'local',  # for efficient docker-specific storage
+                    'Config': {
+                        # these fields must be str
+                        # (ref: https://docs.docker.com/config/containers/logging/local/)
+                        'max-size': f"{container_log_file_size:s}",
+                        'max-file': str(container_log_file_count),
+                        'compress': 'false',
+                    },
+                },
+            },
+        }
+        # merge all container configs generated during prior preparation steps
+        for c in self.container_configs:
+            update_nested_dict(container_config, c)
+        if self.local_config['container']['sandbox-type'] == 'jail':
+            update_nested_dict(container_config, {
+                'HostConfig': {
+                    'SecurityOpt': ['seccomp=unconfined', 'apparmor=unconfined'],
+                }
+            })
+
+        if resource_opts and resource_opts.get('shmem'):
+            shmem = int(resource_opts.get('shmem', '0'))
+            self.computer_docker_args['HostConfig']['ShmSize'] = shmem
+            self.computer_docker_args['HostConfig']['MemorySwap'] -= shmem
+            self.computer_docker_args['HostConfig']['Memory'] -= shmem
+
+        encoded_preopen_ports = ','.join(f'{port_no}:preopen:{port_no}' for port_no in preopen_ports)
+        container_config['Labels']['ai.backend.service-ports'] = \
+                image_labels['ai.backend.service-ports'] + ',' + encoded_preopen_ports
+        update_nested_dict(container_config, self.computer_docker_args)
+        kernel_name = f"kernel.{self.image_ref.name.split('/')[-1]}.{self.kernel_id}"
+        if self.local_config['debug']['log-kernel-config']:
+            log.debug('full container config: {!r}', pretty(container_config))
+
+        # optional local override of docker config
+        extra_container_opts_name = 'agent-docker-container-opts.json'
+        for extra_container_opts_file in [
+            Path('/etc/backend.ai') / extra_container_opts_name,
+            Path.home() / '.config' / 'backend.ai' / extra_container_opts_name,
+            Path.cwd() / extra_container_opts_name,
+        ]:
+            if extra_container_opts_file.is_file():
+                try:
+                    extra_container_opts = json.loads(extra_container_opts_file.read_bytes())
+                    update_nested_dict(container_config, extra_container_opts)
+                except IOError:
+                    pass
+
+        # We are all set! Create and start the container.
+        try:
+            container = await self.docker.containers.create(
+                config=container_config, name=kernel_name)
+            cid = container._id
+
+            resource_spec.container_id = cid
+            # Write resource.txt again to update the contaienr id.
+            with open(self.config_dir / 'resource.txt', 'w') as f:
+                await loop.run_in_executor(None, resource_spec.write_to_file, f)
+            async with AsyncFileWriter(
+                target_filename=self.config_dir / 'resource.txt',
+                access_mode='a'
+            ) as writer:
+                for dev_name, device_alloc in resource_spec.allocations.items():
+                    computer_ctx = self.computers[dev_name]
+                    kvpairs = \
+                        await computer_ctx.instance.generate_resource_data(device_alloc)
+                    for k, v in kvpairs.items():
+                        await writer.write(f'{k}={v}\n')
+
+            await container.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Oops, we have to restore the allocated resources!
+            if (sys.platform.startswith('linux') and
+                self.local_config['container']['scratch-type'] == 'memory'):
+                await destroy_scratch_filesystem(self.scratch_dir)
+                await destroy_scratch_filesystem(self.tmp_dir)
+                await loop.run_in_executor(None, shutil.rmtree, self.tmp_dir)
+            await loop.run_in_executor(None, shutil.rmtree, self.scratch_dir)
+            self.port_pool.update(host_ports)
+            async with self.resource_lock:
+                for dev_name, device_alloc in resource_spec.allocations.items():
+                    self.computers[dev_name].alloc_map.free(device_alloc)
+            raise
+
+        ctnr_host_port_map: MutableMapping[int, int] = {}
+        stdin_port = 0
+        stdout_port = 0
+        for idx, port in enumerate(exposed_ports):
+            host_port = int((await container.port(port))[0]['HostPort'])
+            assert host_port == host_ports[idx]
+            if port == 2000:     # intrinsic
+                repl_in_port = host_port
+            elif port == 2001:   # intrinsic
+                repl_out_port = host_port
+            elif port == 2002:   # legacy
+                stdin_port = host_port
+            elif port == 2003:   # legacy
+                stdout_port = host_port
+            else:
+                ctnr_host_port_map[port] = host_port
+        for sport in service_ports:
+            sport['host_ports'] = tuple(
+                ctnr_host_port_map[cport] for cport in sport['container_ports']
+            )
+
+        kernel_obj = await DockerKernel.new(
+            self.kernel_id,
+            self.image_ref,
+            self.kspec_version,
+            agent_config=self.local_config,
+            service_ports=service_ports,
+            resource_spec=resource_spec,
+            data={
+                'container_id': container._id,
+                'kernel_host': kernel_host,
+                'repl_in_port': repl_in_port,
+                'repl_out_port': repl_out_port,
+                'stdin_port': stdin_port,    # legacy
+                'stdout_port': stdout_port,  # legacy
+                'host_ports': host_ports,
+                'domain_socket_proxies': self.domain_socket_proxies,
+                'block_service_ports': self.internal_data.get('block_service_ports', False)
+            })
+        return kernel_obj
 
 
 class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
@@ -437,629 +1068,24 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                 raise
         return False
 
-    async def create_kernel__init_context(
+    async def init_kernel_context(
         self,
         kernel_id: KernelId,
         kernel_config: KernelCreationConfig,
         *,
         restarting: bool = False,
     ) -> DockerKernelCreationContext:
-        base_ctx = await super().create_kernel__init_context(kernel_id, kernel_config)
-        scratch_dir = (self.local_config['container']['scratch-root'] / str(kernel_id)).resolve()
-        tmp_dir = (self.local_config['container']['scratch-root'] / f'{kernel_id}_tmp').resolve()
         return DockerKernelCreationContext(
-            scratch_dir=scratch_dir,
-            tmp_dir=tmp_dir,
-            config_dir=scratch_dir / 'config',
-            work_dir=scratch_dir / 'work',
-            container_configs=[],
-            domain_socket_proxies=[],
-            computer_docker_args={},
-            # should come last because of python/mypy#9395
-            **attr.asdict(base_ctx),
-        )
-
-    async def create_kernel__get_extra_envs(
-        self,
-        context: DockerKernelCreationContext,
-    ) -> Mapping[str, str]:
-        return {}
-
-    async def create_kernel__prepare_resource_spec(
-        self,
-        ctx: DockerKernelCreationContext,
-    ) -> Tuple[KernelResourceSpec, Optional[Mapping[str, Any]]]:
-        loop = current_loop()
-        if ctx.restarting:
-            resource_spec = await loop.run_in_executor(
-                None,
-                self._kernel_resource_spec_read,
-                ctx.config_dir / 'resource.txt')
-            resource_opts = None
-        else:
-            slots = ResourceSlot.from_json(ctx.kernel_config['resource_slots'])
-            # Ensure that we have intrinsic slots.
-            assert SlotName('cpu') in slots
-            assert SlotName('mem') in slots
-            # accept unknown slot type with zero values
-            # but reject if they have non-zero values.
-            for st, sv in slots.items():
-                if st not in known_slot_types and sv != Decimal(0):
-                    raise UnsupportedResource(st)
-            # sanitize the slots
-            current_resource_slots.set(known_slot_types)
-            slots = slots.normalize_slots(ignore_unknown=True)
-            resource_spec = KernelResourceSpec(
-                container_id='',
-                allocations={},
-                slots={**slots},  # copy
-                mounts=[],
-                scratch_disk_size=0,  # TODO: implement (#70)
-            )
-            resource_opts = ctx.kernel_config.get('resource_opts', {})
-        return resource_spec, resource_opts
-
-    async def create_kernel__prepare_scratch(
-        self,
-        ctx: DockerKernelCreationContext,
-    ) -> None:
-        loop = current_loop()
-
-        # Create the scratch, config, and work directories.
-        if (
-            sys.platform.startswith('linux')
-            and self.local_config['container']['scratch-type'] == 'memory'
-        ):
-            await loop.run_in_executor(None, partial(ctx.tmp_dir.mkdir, exist_ok=True))
-            await create_scratch_filesystem(ctx.scratch_dir, 64)
-            await create_scratch_filesystem(ctx.tmp_dir, 64)
-        else:
-            await loop.run_in_executor(None, partial(ctx.scratch_dir.mkdir, exist_ok=True))
-
-        def _create_scratch_dirs():
-            ctx.config_dir.mkdir(parents=True, exist_ok=True)
-            ctx.work_dir.mkdir(parents=True, exist_ok=True)
-
-        await loop.run_in_executor(None, _create_scratch_dirs)
-
-        if not ctx.restarting:
-            # Since these files are bind-mounted inside a bind-mounted directory,
-            # we need to touch them first to avoid their "ghost" files are created
-            # as root in the host-side filesystem, which prevents deletion of scratch
-            # directories when the agent is running as non-root.
-            def _clone_dotfiles():
-                jupyter_custom_css_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', 'jupyter-custom.css'))
-                logo_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', 'logo.svg'))
-                font_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', 'roboto.ttf'))
-                font_italic_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', 'roboto-italic.ttf'))
-                bashrc_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', '.bashrc'))
-                bash_profile_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', '.bash_profile'))
-                vimrc_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', '.vimrc'))
-                tmux_conf_path = Path(pkg_resources.resource_filename(
-                    'ai.backend.runner', '.tmux.conf'))
-                jupyter_custom_dir = (ctx.work_dir / '.jupyter' / 'custom')
-                jupyter_custom_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy(jupyter_custom_css_path.resolve(), jupyter_custom_dir / 'custom.css')
-                shutil.copy(logo_path.resolve(), jupyter_custom_dir / 'logo.svg')
-                shutil.copy(font_path.resolve(), jupyter_custom_dir / 'roboto.ttf')
-                shutil.copy(font_italic_path.resolve(), jupyter_custom_dir / 'roboto-italic.ttf')
-                shutil.copy(bashrc_path.resolve(), ctx.work_dir / '.bashrc')
-                shutil.copy(bash_profile_path.resolve(), ctx.work_dir / '.bash_profile')
-                shutil.copy(vimrc_path.resolve(), ctx.work_dir / '.vimrc')
-                shutil.copy(tmux_conf_path.resolve(), ctx.work_dir / '.tmux.conf')
-                if KernelFeatures.UID_MATCH in ctx.kernel_features:
-                    uid = self.local_config['container']['kernel-uid']
-                    gid = self.local_config['container']['kernel-gid']
-                    if os.geteuid() == 0:  # only possible when I am root.
-                        os.chown(ctx.work_dir, uid, gid)
-                        os.chown(ctx.work_dir / '.jupyter', uid, gid)
-                        os.chown(ctx.work_dir / '.jupyter' / 'custom', uid, gid)
-                        os.chown(ctx.work_dir / '.bashrc', uid, gid)
-                        os.chown(ctx.work_dir / '.bash_profile', uid, gid)
-                        os.chown(ctx.work_dir / '.vimrc', uid, gid)
-                        os.chown(ctx.work_dir / '.tmux.conf', uid, gid)
-
-            await loop.run_in_executor(None, _clone_dotfiles)
-
-    async def create_kernel__get_intrinsic_mounts(
-        self,
-        ctx: DockerKernelCreationContext,
-    ) -> Sequence[Mount]:
-        loop = current_loop()
-
-        # scratch/config/tmp mounts
-        mounts: List[Mount] = [
-            Mount(MountTypes.BIND, ctx.config_dir, Path("/home/config"),
-                  MountPermission.READ_ONLY),
-            Mount(MountTypes.BIND, ctx.work_dir, Path("/home/work"),
-                  MountPermission.READ_WRITE),
-        ]
-        if (sys.platform.startswith("linux") and
-            self.local_config["container"]["scratch-type"] == "memory"):
-            mounts.append(Mount(
-                MountTypes.BIND,
-                ctx.tmp_dir,
-                Path("/tmp"),
-                MountPermission.READ_WRITE,
-            ))
-
-        # lxcfs mounts
-        lxcfs_root = Path("/var/lib/lxcfs")
-        if lxcfs_root.is_dir():
-            mounts.extend(
-                Mount(
-                    MountTypes.BIND,
-                    lxcfs_proc_path,
-                    "/" / lxcfs_proc_path.relative_to(lxcfs_root),
-                    MountPermission.READ_WRITE,
-                )
-                for lxcfs_proc_path in (lxcfs_root / "proc").iterdir()
-            )
-            mounts.extend(
-                Mount(
-                    MountTypes.BIND,
-                    lxcfs_root / path,
-                    "/" / Path(path),
-                    MountPermission.READ_WRITE,
-                )
-                for path in [
-                    "sys/devices/system/cpu",
-                    "sys/devices/system/cpu/online",
-                ]
-                if Path(lxcfs_root / path).exists()
-            )
-
-        # extra mounts
-        extra_mount_list = await get_extra_volumes(self.docker, ctx.image_ref.short)
-        mounts.extend(Mount(MountTypes.VOLUME, v.name, v.container_path, v.mode)
-                      for v in extra_mount_list)
-
-        # debug mounts
-        if self.local_config['debug']['coredump']['enabled']:
-            mounts.append(Mount(
-                MountTypes.BIND,
-                self.local_config['debug']['coredump']['path'],
-                self.local_config['debug']['coredump']['core_path'],
-                MountPermission.READ_WRITE,
-            ))
-
-        # agent-socket mount
-        mounts.append(Mount(
-            MountTypes.BIND,
+            kernel_id,
+            kernel_config,
+            self.local_config,
+            self.computers,
+            self.port_pool,
             self.agent_sockpath,
-            Path('/opt/kernel/agent.sock'),
-            MountPermission.READ_WRITE,
-        ))
-
-        # domain-socket proxy mount
-        # (used for special service containers such image importer)
-        for host_sock_path in ctx.internal_data.get('domain_socket_proxies', []):
-            await loop.run_in_executor(
-                None,
-                partial((ipc_base_path / 'proxy').mkdir, parents=True, exist_ok=True))
-            host_proxy_path = ipc_base_path / 'proxy' / f'{secrets.token_hex(12)}.sock'
-            proxy_server = await asyncio.start_unix_server(
-                aiotools.apartial(proxy_connection, host_sock_path),
-                str(host_proxy_path))
-            await loop.run_in_executor(None, host_proxy_path.chmod, 0o666)
-            ctx.domain_socket_proxies.append(DomainSocketProxy(
-                Path(host_sock_path),
-                host_proxy_path,
-                proxy_server,
-            ))
-            mounts.append(Mount(
-                MountTypes.BIND,
-                host_proxy_path,
-                host_sock_path,
-                MountPermission.READ_WRITE,
-            ))
-
-        return mounts
-
-    async def create_kernel__apply_network(
-        self,
-        ctx: DockerKernelCreationContext,
-        cluster_info: ClusterInfo,
-    ) -> None:
-        if cluster_info['network_name'] is not None:
-            ctx.container_configs.append({
-                'HostConfig': {
-                    'NetworkMode': cluster_info['network_name'],
-                },
-                'NetworkingConfig': {
-                    'EndpointsConfig': {
-                        cluster_info['network_name']: {
-                            'Aliases': [ctx.kernel_config['cluster_hostname']],
-                        },
-                    },
-                },
-            })
-            # RDMA mounts
-            ib_root = Path("/dev/infiniband")
-            if ib_root.is_dir() and (ib_root / "uverbs0").exists():
-                ctx.container_configs.append({
-                    'HostConfig': {
-                        'Devices': [
-                            {
-                                'PathOnHost': "/dev/infiniband",
-                                'PathInContainer': "/dev/infiniband",
-                                'CgroupPermissions': "rwm",
-                            },
-                        ],
-                    },
-                })
-
-    async def create_kernel__install_ssh_keypair(
-        self,
-        ctx: DockerKernelCreationContext,
-        cluster_info: ClusterInfo,
-    ) -> None:
-        sshkey = cluster_info['ssh_keypair']
-        if sshkey is None:
-            return
-
-        def _write_keypair():
-            try:
-                priv_key_path = (ctx.config_dir / 'ssh' / 'id_cluster')
-                pub_key_path = (ctx.config_dir / 'ssh' / 'id_cluster.pub')
-                priv_key_path.parent.mkdir(parents=True, exist_ok=True)
-                priv_key_path.write_text(sshkey['private_key'])
-                pub_key_path.write_text(sshkey['public_key'])
-                if KernelFeatures.UID_MATCH in ctx.kernel_features:
-                    uid = self.local_config['container']['kernel-uid']
-                    gid = self.local_config['container']['kernel-gid']
-                    if os.geteuid() == 0:  # only possible when I am root.
-                        os.chown(str(priv_key_path), uid, gid)
-                        os.chown(str(pub_key_path), uid, gid)
-                priv_key_path.chmod(0o600)
-            except Exception:
-                log.exception('error while writing cluster keypair')
-
-        current_loop().run_in_executor(None, _write_keypair)
-
-    async def create_kernel__process_mounts(
-        self,
-        ctx: DockerKernelCreationContext,
-        mounts: Sequence[Mount],
-    ):
-
-        def fix_unsupported_perm(folder_perm: MountPermission) -> MountPermission:
-            if folder_perm == MountPermission.RW_DELETE:
-                # TODO: enforce readable/writable but not deletable
-                # (Currently docker's READ_WRITE includes DELETE)
-                return MountPermission.READ_WRITE
-            return folder_perm
-
-        container_config = {
-            'HostConfig': {
-                'Mounts': [
-                    {
-                        'Target': str(mount.target),
-                        'Source': str(mount.source),
-                        'Type': mount.type.value,
-                        'ReadOnly': fix_unsupported_perm(mount.permission) == MountPermission.READ_ONLY,
-                        f'{mount.type.value.capitalize()}Options':
-                            mount.opts if mount.opts else {},
-                    }
-                    for mount in mounts
-                ],
-            }
-        }
-        ctx.container_configs.append(container_config)
-
-    async def create_kernel__apply_accelerator_allocation(
-        self,
-        ctx: DockerKernelCreationContext,
-        computer,
-        device_alloc,
-    ) -> None:
-        update_nested_dict(
-            ctx.computer_docker_args,
-            await computer.generate_docker_args(self.docker, device_alloc))
-
-    async def create_kernel__spawn(
-        self,
-        ctx: DockerKernelCreationContext,
-        resource_spec: KernelResourceSpec,
-        resource_opts,
-        environ: Mapping[str, str],
-        service_ports,
-        preopen_ports,
-        cmdargs: List[str],
-    ) -> DockerKernel:
-        loop = current_loop()
-        image_labels = ctx.kernel_config['image']['labels']
-        exposed_ports = [2000, 2001]
-        for sport in service_ports:
-            exposed_ports.extend(sport['container_ports'])
-
-        if ctx.restarting:
-            pass
-        else:
-            # Create bootstrap.sh into workdir if needed
-            if bootstrap := ctx.kernel_config.get('bootstrap_script'):
-
-                def _write_user_bootstrap_script():
-                    (ctx.work_dir / 'bootstrap.sh').write_text(bootstrap)
-                    if KernelFeatures.UID_MATCH in ctx.kernel_features:
-                        uid = self.local_config['container']['kernel-uid']
-                        gid = self.local_config['container']['kernel-gid']
-                        if os.geteuid() == 0:
-                            os.chown(ctx.work_dir / 'bootstrap.sh', uid, gid)
-
-                await loop.run_in_executor(None, _write_user_bootstrap_script)
-
-            with StringIO() as buf:
-                for k, v in environ.items():
-                    buf.write(f'{k}={v}\n')
-                accel_envs = ctx.computer_docker_args.get('Env', [])
-                for env in accel_envs:
-                    buf.write(f'{env}\n')
-                await loop.run_in_executor(
-                    None,
-                    (ctx.config_dir / 'environ.txt').write_bytes,
-                    buf.getvalue().encode('utf8'),
-                )
-
-            with StringIO() as buf:
-                resource_spec.write_to_file(buf)
-                for dev_type, device_alloc in resource_spec.allocations.items():
-                    computer_ctx = self.computers[dev_type]
-                    kvpairs = \
-                        await computer_ctx.instance.generate_resource_data(device_alloc)
-                    for k, v in kvpairs.items():
-                        buf.write(f'{k}={v}\n')
-                await loop.run_in_executor(
-                    None,
-                    (ctx.config_dir / 'resource.txt').write_bytes,
-                    buf.getvalue().encode('utf8'),
-                )
-
-            docker_creds = ctx.internal_data.get('docker_credentials')
-            if docker_creds:
-                await loop.run_in_executor(
-                    None,
-                    (ctx.config_dir / 'docker-creds.json').write_text,
-                    json.dumps(docker_creds))
-
-        # TODO: refactor out dotfiles/sshkey initialization to the base agent?
-
-        # Create SSH keypair only if ssh_keypair internal_data exists and
-        # /home/work/.ssh folder is not mounted.
-        if ctx.internal_data.get('ssh_keypair'):
-            for mount in resource_spec.mounts:
-                container_path = str(mount).split(':')[1]
-                if container_path == '/home/work/.ssh':
-                    break
-            else:
-                pubkey = ctx.internal_data['ssh_keypair']['public_key'].encode('ascii')
-                privkey = ctx.internal_data['ssh_keypair']['private_key'].encode('ascii')
-                ssh_dir = ctx.work_dir / '.ssh'
-
-                def _populate_ssh_config():
-                    ssh_dir.mkdir(parents=True, exist_ok=True)
-                    ssh_dir.chmod(0o700)
-                    (ssh_dir / 'authorized_keys').write_bytes(pubkey)
-                    (ssh_dir / 'authorized_keys').chmod(0o600)
-                    (ctx.work_dir / 'id_container').write_bytes(privkey)
-                    (ctx.work_dir / 'id_container').chmod(0o600)
-                    if KernelFeatures.UID_MATCH in ctx.kernel_features:
-                        uid = self.local_config['container']['kernel-uid']
-                        gid = self.local_config['container']['kernel-gid']
-                        if os.geteuid() == 0:  # only possible when I am root.
-                            os.chown(ssh_dir, uid, gid)
-                            os.chown(ssh_dir / 'authorized_keys', uid, gid)
-                            os.chown(ctx.work_dir / 'id_container', uid, gid)
-
-                await loop.run_in_executor(None, _populate_ssh_config)
-
-        # higher priority dotfiles are stored last to support overwriting
-        for dotfile in ctx.internal_data.get('dotfiles', []):
-            if dotfile['path'].startswith('/'):
-                if dotfile['path'].startswith('/home/'):
-                    path_arr = dotfile['path'].split('/')
-                    file_path: Path = ctx.scratch_dir / '/'.join(path_arr[2:])
-                else:
-                    file_path = Path(dotfile['path'])
-            else:
-                file_path = ctx.work_dir / dotfile['path']
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            await loop.run_in_executor(
-                None,
-                file_path.write_text,
-                dotfile['data'])
-
-            tmp = Path(file_path)
-            while tmp != ctx.work_dir:
-                tmp.chmod(int(dotfile['perm'], 8))
-                # only possible when I am root.
-                if KernelFeatures.UID_MATCH in ctx.kernel_features and os.geteuid() == 0:
-                    uid = self.local_config['container']['kernel-uid']
-                    gid = self.local_config['container']['kernel-gid']
-                    os.chown(tmp, uid, gid)
-                tmp = tmp.parent
-
-        # PHASE 4: Run!
-        kernel_host = self.local_config['container']['kernel-host']
-        if len(exposed_ports) > len(self.port_pool):
-            raise RuntimeError('Container ports are not sufficiently available.')
-        host_ports = []
-        for eport in exposed_ports:
-            hport = self.port_pool.pop()
-            host_ports.append(hport)
-
-        container_log_size = self.local_config['agent']['container-logs']['max-length']
-        container_log_file_count = 5
-        container_log_file_size = BinarySize(container_log_size // container_log_file_count)
-        container_config: MutableMapping[str, Any] = {
-            'Image': ctx.image_ref.canonical,
-            'Tty': True,
-            'OpenStdin': True,
-            'Privileged': False,
-            'StopSignal': 'SIGINT',
-            'ExposedPorts': {
-                f'{port}/tcp': {} for port in exposed_ports
-            },
-            'EntryPoint': ["/opt/kernel/entrypoint.sh"],
-            'Cmd': cmdargs,
-            'Env': [f'{k}={v}' for k, v in environ.items()],
-            'WorkingDir': "/home/work",
-            'Hostname': ctx.kernel_config['cluster_hostname'],
-            'Labels': {
-                'ai.backend.kernel-id': str(ctx.kernel_id),
-                'ai.backend.internal.block-service-ports':
-                    '1' if ctx.internal_data.get('block_service_ports', False) else '0'
-            },
-            'HostConfig': {
-                'Init': True,
-                'PortBindings': {
-                    f'{eport}/tcp': [{'HostPort': str(hport),
-                                      'HostIp': str(kernel_host)}]
-                    for eport, hport in zip(exposed_ports, host_ports)
-                },
-                'PublishAllPorts': False,  # we manage port mapping manually!
-                'CapAdd': [
-                    'IPC_LOCK',  # for hugepages and RDMA
-                ],
-                'Ulimits': [
-                    {"Name": "nofile", "Soft": 1048576, "Hard": 1048576},
-                    {"Name": "memlock", "Soft": -1, "Hard": -1},
-                ],
-                'LogConfig': {
-                    'Type': 'local',  # for efficient docker-specific storage
-                    'Config': {
-                        # these fields must be str
-                        # (ref: https://docs.docker.com/config/containers/logging/local/)
-                        'max-size': f"{container_log_file_size:s}",
-                        'max-file': str(container_log_file_count),
-                        'compress': 'false',
-                    },
-                },
-            },
-        }
-        # merge all container configs generated during prior preparation steps
-        for c in ctx.container_configs:
-            update_nested_dict(container_config, c)
-        if self.local_config['container']['sandbox-type'] == 'jail':
-            update_nested_dict(container_config, {
-                'HostConfig': {
-                    'SecurityOpt': ['seccomp=unconfined', 'apparmor=unconfined'],
-                }
-            })
-
-        if resource_opts and resource_opts.get('shmem'):
-            shmem = int(resource_opts.get('shmem', '0'))
-            ctx.computer_docker_args['HostConfig']['ShmSize'] = shmem
-            ctx.computer_docker_args['HostConfig']['MemorySwap'] -= shmem
-            ctx.computer_docker_args['HostConfig']['Memory'] -= shmem
-
-        encoded_preopen_ports = ','.join(f'{port_no}:preopen:{port_no}' for port_no in preopen_ports)
-        container_config['Labels']['ai.backend.service-ports'] = \
-                image_labels['ai.backend.service-ports'] + ',' + encoded_preopen_ports
-        update_nested_dict(container_config, ctx.computer_docker_args)
-        kernel_name = f"kernel.{ctx.image_ref.name.split('/')[-1]}.{ctx.kernel_id}"
-        if self.local_config['debug']['log-kernel-config']:
-            log.debug('full container config: {!r}', pretty(container_config))
-
-        # optional local override of docker config
-        extra_container_opts_name = 'agent-docker-container-opts.json'
-        for extra_container_opts_file in [
-            Path('/etc/backend.ai') / extra_container_opts_name,
-            Path.home() / '.config' / 'backend.ai' / extra_container_opts_name,
-            Path.cwd() / extra_container_opts_name,
-        ]:
-            if extra_container_opts_file.is_file():
-                try:
-                    extra_container_opts = json.loads(extra_container_opts_file.read_bytes())
-                    update_nested_dict(container_config, extra_container_opts)
-                except IOError:
-                    pass
-
-        # We are all set! Create and start the container.
-        try:
-            container = await self.docker.containers.create(
-                config=container_config, name=kernel_name)
-            cid = container._id
-
-            resource_spec.container_id = cid
-            # Write resource.txt again to update the contaienr id.
-            with open(ctx.config_dir / 'resource.txt', 'w') as f:
-                await loop.run_in_executor(None, resource_spec.write_to_file, f)
-            async with AsyncFileWriter(
-                target_filename=ctx.config_dir / 'resource.txt',
-                access_mode='a'
-            ) as writer:
-                for dev_name, device_alloc in resource_spec.allocations.items():
-                    computer_ctx = self.computers[dev_name]
-                    kvpairs = \
-                        await computer_ctx.instance.generate_resource_data(device_alloc)
-                    for k, v in kvpairs.items():
-                        await writer.write(f'{k}={v}\n')
-
-            await container.start()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Oops, we have to restore the allocated resources!
-            if (sys.platform.startswith('linux') and
-                self.local_config['container']['scratch-type'] == 'memory'):
-                await destroy_scratch_filesystem(ctx.scratch_dir)
-                await destroy_scratch_filesystem(ctx.tmp_dir)
-                await loop.run_in_executor(None, shutil.rmtree, ctx.tmp_dir)
-            await loop.run_in_executor(None, shutil.rmtree, ctx.scratch_dir)
-            self.port_pool.update(host_ports)
-            async with self.resource_lock:
-                for dev_name, device_alloc in resource_spec.allocations.items():
-                    self.computers[dev_name].alloc_map.free(device_alloc)
-            raise
-
-        ctnr_host_port_map: MutableMapping[int, int] = {}
-        stdin_port = 0
-        stdout_port = 0
-        for idx, port in enumerate(exposed_ports):
-            host_port = int((await container.port(port))[0]['HostPort'])
-            assert host_port == host_ports[idx]
-            if port == 2000:     # intrinsic
-                repl_in_port = host_port
-            elif port == 2001:   # intrinsic
-                repl_out_port = host_port
-            elif port == 2002:   # legacy
-                stdin_port = host_port
-            elif port == 2003:   # legacy
-                stdout_port = host_port
-            else:
-                ctnr_host_port_map[port] = host_port
-        for sport in service_ports:
-            sport['host_ports'] = tuple(
-                ctnr_host_port_map[cport] for cport in sport['container_ports']
-            )
-
-        kernel_obj = await DockerKernel.new(
-            ctx.kernel_id,
-            ctx.image_ref,
-            ctx.kspec_version,
-            agent_config=self.local_config,
-            service_ports=service_ports,
-            resource_spec=resource_spec,
-            data={
-                'container_id': container._id,
-                'kernel_host': kernel_host,
-                'repl_in_port': repl_in_port,
-                'repl_out_port': repl_out_port,
-                'stdin_port': stdin_port,    # legacy
-                'stdout_port': stdout_port,  # legacy
-                'host_ports': host_ports,
-                'domain_socket_proxies': ctx.domain_socket_proxies,
-                'block_service_ports': ctx.internal_data.get('block_service_ports', False)
-            })
-        return kernel_obj
+            self.resource_lock,
+            self.docker,
+            restarting=restarting
+        )
 
     async def restart_kernel__load_config(
         self,
@@ -1280,8 +1306,3 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                         log.exception("monitor_docker_events(): unexpected error")
             finally:
                 await asyncio.shield(self.docker.events.stop())
-
-    def _kernel_resource_spec_read(self, filename):
-        with open(filename, 'r') as f:
-            resource_spec = KernelResourceSpec.read_from_file(f)
-        return resource_spec

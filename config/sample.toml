@@ -7,6 +7,7 @@ password = ""				    # env: BACKEND_ETCD_PASSWORD
 
 [agent]
 # Agent mode; required
+# One of: "kubernetes", "docker"
 mode = "docker"
 
 # Change the reported host/address of the agent.
@@ -86,13 +87,15 @@ sandbox-type = "docker"
 # Additional arguments passed to the jail executable in containers.
 jail-args = []
 
-# One of: "hostdir", "memory"
+# One of: "hostdir", "memory", "k8s-nfs"
 # "hostdir": creates an empty host directory and mount it as /home/work of containers.
 # "memory": creates an in-memory tmpfs and mount it as /home/work of containers. (only supported in Linux)
+# "k8s-nfs": creates Kubernetes PV/PVC and mounts it when creating Pods. (only supported in Kubernetes mode)
 scratch-type = "hostdir"        # env: BACKEND_SANDBOX_TYPE
 
-# Only meaningful when scratch-type = "hostdir"
-# If not exists, it is auto-created.
+# Only meaningful when scratch-type is "hostdir" or "k8s-nfs".
+# "hostdir": If not exists, it is auto-created.
+# "k8s-nfs": Source NFS device should be mounted to this location.
 scratch-root = "./scratches"    # env: BACKEND_SCRATCH_ROOT
 
 # Limit the maximum size of the scratch space.
@@ -102,6 +105,13 @@ scratch-size = "1G"
 # Enable legacy swarm mode.
 # This should be true to let this agent handles multi-container session.
 swarm-enabled = false
+
+# Only meaningful when scratch-type is "k8s-nfs".
+# Mount point of source NFS disk should match with scratch-root folder's mount point.
+scratch-nfs-address = ""
+
+# Only meaningful when scratch-type is "k8s-nfs".
+scratch-nfs-options = ""
 
 
 [watcher]

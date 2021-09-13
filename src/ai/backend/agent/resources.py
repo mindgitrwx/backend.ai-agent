@@ -374,7 +374,7 @@ class ComputePluginContext(BasePluginContext[AbstractComputePlugin]):
 @attr.s(auto_attribs=True, slots=True)
 class Mount:
     type: MountTypes
-    source: Path
+    source: Optional[Path]
     target: Path
     permission: MountPermission = MountPermission.READ_ONLY
     opts: Optional[Mapping[str, Any]] = None
