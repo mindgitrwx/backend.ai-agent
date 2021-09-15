@@ -8,11 +8,20 @@ import logging
 from pathlib import Path
 import re
 from typing import (
-    Any, Optional,
+    Any,
+    AsyncContextManager,
     Iterable,
-    Mapping, MutableMapping,
-    List, Sequence, Tuple, Union,
-    Type, overload,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    overload,
 )
 from typing_extensions import Final
 from uuid import UUID
@@ -38,6 +47,30 @@ IPAddress = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
 InOtherContainerPID: Final = ContainerPID(PID(-2))
 NotContainerPID: Final = ContainerPID(PID(-1))
 NotHostPID: Final = HostPID(PID(-1))
+
+
+class SupportsAsyncClose(Protocol):
+    async def close(self) -> None:
+        ...
+
+
+_SupportsAsyncCloseT = TypeVar('_SupportsAsyncCloseT', bound=SupportsAsyncClose)
+
+
+class closing_async(AsyncContextManager[_SupportsAsyncCloseT]):
+    """
+    contextlib.closing calls close(), and aiotools.aclosing() calls aclose().
+    This context manager calls close() as a coroutine.
+    """
+
+    def __init__(self, obj: _SupportsAsyncCloseT) -> None:
+        self.obj = obj
+
+    async def __aenter__(self) -> _SupportsAsyncCloseT:
+        return self.obj
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.obj.close()
 
 
 def generate_local_instance_id(hint: str) -> str:

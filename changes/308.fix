@@ -1,0 +1,1 @@
+Fix a random hang for Docker API invocations by recreating aiohttp sessions to avoid keepalive/connection pooling issues

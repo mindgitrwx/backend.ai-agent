@@ -92,6 +92,7 @@ from ..types import (
     LifecycleEvent,
 )
 from ..utils import (
+    closing_async,
     update_nested_dict,
     get_kernel_id_from_container,
     host_pid_to_container_pid,
@@ -153,7 +154,6 @@ class DockerKernelCreationContext(KernelCreationContext):
 
 class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
 
-    docker: Docker
     monitor_docker_task: asyncio.Task
     agent_sockpath: Path
     agent_sock_task: asyncio.Task
@@ -182,11 +182,11 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         DockerContainerError.__reduce__ = _DockerContainerError_reduce   # type: ignore
 
     async def __ainit__(self) -> None:
-        self.docker = Docker()
-        if not self._skip_initial_scan:
-            docker_version = await self.docker.version()
-            log.info('running with Docker {0} with API {1}',
-                     docker_version['Version'], docker_version['ApiVersion'])
+        async with closing_async(Docker()) as docker:
+            if not self._skip_initial_scan:
+                docker_version = await docker.version()
+                log.info('running with Docker {0} with API {1}',
+                         docker_version['Version'], docker_version['ApiVersion'])
         await super().__ainit__()
         await self.check_swarm_status()
         if self.heartbeat_extra_info['swarm_enabled']:
@@ -195,7 +195,6 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         self.agent_sockpath = ipc_base_path / 'container' / f'agent.{self.local_instance_id}.sock'
         socket_relay_name = f"backendai-socket-relay.{self.local_instance_id}"
         socket_relay_container = PersistentServiceContainer(
-            self.docker,
             'backendai-socket-relay:latest',
             {
                 'Cmd': [
@@ -220,6 +219,9 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         self.monitor_docker_task = asyncio.create_task(self.monitor_docker_events())
         self.monitor_swarm_task = asyncio.create_task(self.check_swarm_status(as_task=True))
 
+        # For legacy accelerator plugins
+        self.docker = Docker()
+
     async def shutdown(self, stop_signal: signal.Signals):
         # Stop handling agent sock.
         if self.agent_sock_task is not None:
@@ -233,11 +235,13 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
             if self.monitor_docker_task is not None:
                 self.monitor_docker_task.cancel()
                 await self.monitor_docker_task
-            await self.docker.close()
 
         if self.monitor_swarm_task is not None:
             self.monitor_swarm_task.cancel()
             await self.monitor_swarm_task
+
+        if self.docker:
+            await self.docker.close()
 
     async def detect_resources(self) -> Tuple[
         Mapping[DeviceName, AbstractComputePlugin],
@@ -251,33 +255,34 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
     ) -> Sequence[Tuple[KernelId, Container]]:
         result = []
         fetch_tasks = []
-        for container in (await self.docker.containers.list()):
+        async with closing_async(Docker()) as docker:
+            for container in (await docker.containers.list()):
 
-            async def _fetch_container_info(container):
-                kernel_id = "(unknown)"
-                try:
-                    kernel_id = await get_kernel_id_from_container(container)
-                    if kernel_id is None:
-                        return
-                    if container['State']['Status'] in status_filter:
-                        await container.show()
-                        result.append(
-                            (
-                                kernel_id,
-                                container_from_docker_container(container),
+                async def _fetch_container_info(container):
+                    kernel_id = "(unknown)"
+                    try:
+                        kernel_id = await get_kernel_id_from_container(container)
+                        if kernel_id is None:
+                            return
+                        if container['State']['Status'] in status_filter:
+                            await container.show()
+                            result.append(
+                                (
+                                    kernel_id,
+                                    container_from_docker_container(container),
+                                )
                             )
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        log.exception(
+                            "error while fetching container information (cid:{}, k:{})",
+                            container._id, kernel_id,
                         )
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    log.exception(
-                        "error while fetching container information (cid:{}, k:{})",
-                        container._id, kernel_id,
-                    )
 
-            fetch_tasks.append(_fetch_container_info(container))
+                fetch_tasks.append(_fetch_container_info(container))
 
-        await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            await asyncio.gather(*fetch_tasks, return_exceptions=True)
         return result
 
     async def check_swarm_status(self, as_task=False):
@@ -289,12 +294,13 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                     swarm_enabled = self.local_config['container'].get('swarm-enabled', False)
                     if not swarm_enabled:
                         continue
-                    docker_info = await self.docker.system.info()
-                    if docker_info['Swarm']['LocalNodeState'] == 'inactive':
-                        raise InitializationError(
-                            "The swarm mode is enabled but the node state of "
-                            "the local Docker daemon is inactive."
-                        )
+                    async with closing_async(Docker()) as docker:
+                        docker_info = await docker.system.info()
+                        if docker_info['Swarm']['LocalNodeState'] == 'inactive':
+                            raise InitializationError(
+                                "The swarm mode is enabled but the node state of "
+                                "the local Docker daemon is inactive."
+                            )
                 except InitializationError as e:
                     log.exception(str(e))
                     swarm_enabled = False
@@ -308,26 +314,27 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
             pass
 
     async def scan_images(self) -> Mapping[str, str]:
-        all_images = await self.docker.images.list()
-        updated_images = {}
-        for image in all_images:
-            if image['RepoTags'] is None:
-                continue
-            for repo_tag in image['RepoTags']:
-                if repo_tag.endswith('<none>'):
+        async with closing_async(Docker()) as docker:
+            all_images = await docker.images.list()
+            updated_images = {}
+            for image in all_images:
+                if image['RepoTags'] is None:
                     continue
-                img_detail = await self.docker.images.inspect(repo_tag)
-                labels = img_detail['Config']['Labels']
-                if labels is None or 'ai.backend.kernelspec' not in labels:
-                    continue
-                kernelspec = int(labels['ai.backend.kernelspec'])
-                if MIN_KERNELSPEC <= kernelspec <= MAX_KERNELSPEC:
-                    updated_images[repo_tag] = img_detail['Id']
-        for added_image in (updated_images.keys() - self.images.keys()):
-            log.debug('found kernel image: {0}', added_image)
-        for removed_image in (self.images.keys() - updated_images.keys()):
-            log.debug('removed kernel image: {0}', removed_image)
-        return updated_images
+                for repo_tag in image['RepoTags']:
+                    if repo_tag.endswith('<none>'):
+                        continue
+                    img_detail = await docker.images.inspect(repo_tag)
+                    labels = img_detail['Config']['Labels']
+                    if labels is None or 'ai.backend.kernelspec' not in labels:
+                        continue
+                    kernelspec = int(labels['ai.backend.kernelspec'])
+                    if MIN_KERNELSPEC <= kernelspec <= MAX_KERNELSPEC:
+                        updated_images[repo_tag] = img_detail['Id']
+            for added_image in (updated_images.keys() - self.images.keys()):
+                log.debug('found kernel image: {0}', added_image)
+            for removed_image in (self.images.keys() - updated_images.keys()):
+                log.debug('removed kernel image: {0}', removed_image)
+            return updated_images
 
     async def handle_agent_socket(self):
         """
@@ -414,16 +421,18 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                 'auth': encoded_creds,
             }
         log.info('pulling image {} from registry', image_ref.canonical)
-        await self.docker.images.pull(
-            image_ref.canonical,
-            auth=auth_config)
+        async with closing_async(Docker()) as docker:
+            await docker.images.pull(
+                image_ref.canonical,
+                auth=auth_config)
 
     async def check_image(self, image_ref: ImageRef, image_id: str, auto_pull: AutoPullBehavior) -> bool:
         try:
-            image_info = await self.docker.images.inspect(image_ref.canonical)
-            if auto_pull == AutoPullBehavior.DIGEST:
-                if image_info['Id'] != image_id:
-                    return True
+            async with closing_async(Docker()) as docker:
+                image_info = await docker.images.inspect(image_ref.canonical)
+                if auto_pull == AutoPullBehavior.DIGEST:
+                    if image_info['Id'] != image_id:
+                        return True
             log.info('found the local up-to-date image for {}', image_ref.canonical)
         except DockerError as e:
             if e.status == 404:
@@ -617,7 +626,8 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
             )
 
         # extra mounts
-        extra_mount_list = await get_extra_volumes(self.docker, ctx.image_ref.short)
+        async with closing_async(Docker()) as docker:
+            extra_mount_list = await get_extra_volumes(docker, ctx.image_ref.short)
         mounts.extend(Mount(MountTypes.VOLUME, v.name, v.container_path, v.mode)
                       for v in extra_mount_list)
 
@@ -760,9 +770,11 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         computer,
         device_alloc,
     ) -> None:
-        update_nested_dict(
-            ctx.computer_docker_args,
-            await computer.generate_docker_args(self.docker, device_alloc))
+        async with closing_async(Docker()) as docker:
+            update_nested_dict(
+                ctx.computer_docker_args,
+                await computer.generate_docker_args(docker, device_alloc),
+            )
 
     async def create_kernel__spawn(
         self,
@@ -983,63 +995,64 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                     pass
 
         # We are all set! Create and start the container.
-        try:
-            container = await self.docker.containers.create(
-                config=container_config, name=kernel_name)
-            cid = container._id
+        async with closing_async(Docker()) as docker:
+            try:
+                container = await docker.containers.create(
+                    config=container_config, name=kernel_name)
+                cid = container._id
 
-            resource_spec.container_id = cid
-            # Write resource.txt again to update the contaienr id.
-            with open(ctx.config_dir / 'resource.txt', 'w') as f:
-                await loop.run_in_executor(None, resource_spec.write_to_file, f)
-            async with AsyncFileWriter(
-                    loop=loop,
-                    target_filename=ctx.config_dir / 'resource.txt',
-                    access_mode='a') as writer:
-                for dev_name, device_alloc in resource_spec.allocations.items():
-                    computer_ctx = self.computers[dev_name]
-                    kvpairs = \
-                        await computer_ctx.instance.generate_resource_data(device_alloc)
-                    for k, v in kvpairs.items():
-                        await writer.write(f'{k}={v}\n')
+                resource_spec.container_id = cid
+                # Write resource.txt again to update the contaienr id.
+                with open(ctx.config_dir / 'resource.txt', 'w') as f:
+                    await loop.run_in_executor(None, resource_spec.write_to_file, f)
+                async with AsyncFileWriter(
+                        loop=loop,
+                        target_filename=ctx.config_dir / 'resource.txt',
+                        access_mode='a') as writer:
+                    for dev_name, device_alloc in resource_spec.allocations.items():
+                        computer_ctx = self.computers[dev_name]
+                        kvpairs = \
+                            await computer_ctx.instance.generate_resource_data(device_alloc)
+                        for k, v in kvpairs.items():
+                            await writer.write(f'{k}={v}\n')
 
-            await container.start()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Oops, we have to restore the allocated resources!
-            if (sys.platform.startswith('linux') and
-                self.local_config['container']['scratch-type'] == 'memory'):
-                await destroy_scratch_filesystem(ctx.scratch_dir)
-                await destroy_scratch_filesystem(ctx.tmp_dir)
-                await loop.run_in_executor(None, shutil.rmtree, ctx.tmp_dir)
-            await loop.run_in_executor(None, shutil.rmtree, ctx.scratch_dir)
-            self.port_pool.update(host_ports)
-            async with self.resource_lock:
-                for dev_name, device_alloc in resource_spec.allocations.items():
-                    self.computers[dev_name].alloc_map.free(device_alloc)
-            raise
+                await container.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Oops, we have to restore the allocated resources!
+                if (sys.platform.startswith('linux') and
+                    self.local_config['container']['scratch-type'] == 'memory'):
+                    await destroy_scratch_filesystem(ctx.scratch_dir)
+                    await destroy_scratch_filesystem(ctx.tmp_dir)
+                    await loop.run_in_executor(None, shutil.rmtree, ctx.tmp_dir)
+                await loop.run_in_executor(None, shutil.rmtree, ctx.scratch_dir)
+                self.port_pool.update(host_ports)
+                async with self.resource_lock:
+                    for dev_name, device_alloc in resource_spec.allocations.items():
+                        self.computers[dev_name].alloc_map.free(device_alloc)
+                raise
 
-        ctnr_host_port_map: MutableMapping[int, int] = {}
-        stdin_port = 0
-        stdout_port = 0
-        for idx, port in enumerate(exposed_ports):
-            host_port = int((await container.port(port))[0]['HostPort'])
-            assert host_port == host_ports[idx]
-            if port == 2000:     # intrinsic
-                repl_in_port = host_port
-            elif port == 2001:   # intrinsic
-                repl_out_port = host_port
-            elif port == 2002:   # legacy
-                stdin_port = host_port
-            elif port == 2003:   # legacy
-                stdout_port = host_port
-            else:
-                ctnr_host_port_map[port] = host_port
-        for sport in service_ports:
-            sport['host_ports'] = tuple(
-                ctnr_host_port_map[cport] for cport in sport['container_ports']
-            )
+            ctnr_host_port_map: MutableMapping[int, int] = {}
+            stdin_port = 0
+            stdout_port = 0
+            for idx, port in enumerate(exposed_ports):
+                host_port = int((await container.port(port))[0]['HostPort'])
+                assert host_port == host_ports[idx]
+                if port == 2000:     # intrinsic
+                    repl_in_port = host_port
+                elif port == 2001:   # intrinsic
+                    repl_out_port = host_port
+                elif port == 2002:   # legacy
+                    stdin_port = host_port
+                elif port == 2003:   # legacy
+                    stdout_port = host_port
+                else:
+                    ctnr_host_port_map[port] = host_port
+            for sport in service_ports:
+                sport['host_ports'] = tuple(
+                    ctnr_host_port_map[cport] for cport in sport['container_ports']
+                )
 
         kernel_obj = await DockerKernel.new(
             ctx.kernel_id,
@@ -1097,10 +1110,11 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         if container_id is None:
             return
         try:
-            container = self.docker.containers.container(container_id)
-            # The default timeout of the docker stop API is 10 seconds
-            # to kill if container does not self-terminate.
-            await container.stop()
+            async with closing_async(Docker()) as docker:
+                container = docker.containers.container(container_id)
+                # The default timeout of the docker stop API is 10 seconds
+                # to kill if container does not self-terminate.
+                await container.stop()
         except DockerError as e:
             if e.status == 409 and 'is not running' in e.message:
                 # already dead
@@ -1122,100 +1136,108 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
         restarting: bool,
     ) -> None:
         loop = current_loop()
-        if container_id is not None:
-            container = self.docker.containers.container(container_id)
+        async with closing_async(Docker()) as docker:
+            if container_id is not None:
+                container = docker.containers.container(container_id)
 
-            async def log_iter():
-                it = container.log(
-                    stdout=True, stderr=True, follow=True,
-                )
-                async with aiotools.aclosing(it):
-                    async for line in it:
-                        yield line.encode('utf-8')
+                async def log_iter():
+                    it = container.log(
+                        stdout=True, stderr=True, follow=True,
+                    )
+                    async with aiotools.aclosing(it):
+                        async for line in it:
+                            yield line.encode('utf-8')
 
-            try:
-                with timeout(60):
-                    await self.collect_logs(kernel_id, container_id, log_iter())
-            except asyncio.TimeoutError:
-                log.warning('timeout for collecting container logs (k:{}, cid:{})',
+                try:
+                    with timeout(60):
+                        await self.collect_logs(kernel_id, container_id, log_iter())
+                except asyncio.TimeoutError:
+                    log.warning('timeout for collecting container logs (k:{}, cid:{})',
+                                kernel_id, container_id)
+                except Exception as e:
+                    log.warning('error while collecting container logs (k:{}, cid:{})',
+                                kernel_id, container_id, exc_info=e)
+
+            kernel_obj = self.kernel_registry.get(kernel_id)
+            if kernel_obj is not None:
+                for domain_socket_proxy in kernel_obj.get('domain_socket_proxies', []):
+                    if domain_socket_proxy.proxy_server.is_serving():
+                        domain_socket_proxy.proxy_server.close()
+                        await domain_socket_proxy.proxy_server.wait_closed()
+                        try:
+                            domain_socket_proxy.host_proxy_path.unlink()
+                        except IOError:
+                            pass
+
+            if not self.local_config['debug']['skip-container-deletion'] and container_id is not None:
+                container = docker.containers.container(container_id)
+                try:
+                    with timeout(90):
+                        await container.delete(force=True, v=True)
+                except DockerError as e:
+                    if e.status == 409 and 'already in progress' in e.message:
+                        return
+                    elif e.status == 404:
+                        return
+                    else:
+                        log.exception(
+                            'unexpected docker error while deleting container (k:{}, c:{})',
                             kernel_id, container_id)
-            except Exception as e:
-                log.warning('error while collecting container logs (k:{}, cid:{})',
-                            kernel_id, container_id, exc_info=e)
+                except asyncio.TimeoutError:
+                    log.warning('container deletion timeout (k:{}, c:{})',
+                                kernel_id, container_id)
 
-        kernel_obj = self.kernel_registry.get(kernel_id)
-        if kernel_obj is not None:
-            for domain_socket_proxy in kernel_obj.get('domain_socket_proxies', []):
-                if domain_socket_proxy.proxy_server.is_serving():
-                    domain_socket_proxy.proxy_server.close()
-                    await domain_socket_proxy.proxy_server.wait_closed()
-                    try:
-                        domain_socket_proxy.host_proxy_path.unlink()
-                    except IOError:
-                        pass
-
-        if not self.local_config['debug']['skip-container-deletion'] and container_id is not None:
-            container = self.docker.containers.container(container_id)
-            try:
-                with timeout(90):
-                    await container.delete(force=True, v=True)
-            except DockerError as e:
-                if e.status == 409 and 'already in progress' in e.message:
-                    return
-                elif e.status == 404:
-                    return
-                else:
-                    log.exception(
-                        'unexpected docker error while deleting container (k:{}, c:{})',
-                        kernel_id, container_id)
-            except asyncio.TimeoutError:
-                log.warning('container deletion timeout (k:{}, c:{})',
-                            kernel_id, container_id)
-
-        if not restarting:
-            scratch_root = self.local_config['container']['scratch-root']
-            scratch_dir = scratch_root / str(kernel_id)
-            tmp_dir = scratch_root / f'{kernel_id}_tmp'
-            try:
-                if (sys.platform.startswith('linux') and
-                    self.local_config['container']['scratch-type'] == 'memory'):
-                    await destroy_scratch_filesystem(scratch_dir)
-                    await destroy_scratch_filesystem(tmp_dir)
-                    await loop.run_in_executor(None, shutil.rmtree, tmp_dir)
-                await loop.run_in_executor(None, shutil.rmtree, scratch_dir)
-            except CalledProcessError:
-                pass
-            except FileNotFoundError:
-                pass
+            if not restarting:
+                scratch_root = self.local_config['container']['scratch-root']
+                scratch_dir = scratch_root / str(kernel_id)
+                tmp_dir = scratch_root / f'{kernel_id}_tmp'
+                try:
+                    if (sys.platform.startswith('linux') and
+                        self.local_config['container']['scratch-type'] == 'memory'):
+                        await destroy_scratch_filesystem(scratch_dir)
+                        await destroy_scratch_filesystem(tmp_dir)
+                        await loop.run_in_executor(None, shutil.rmtree, tmp_dir)
+                    await loop.run_in_executor(None, shutil.rmtree, scratch_dir)
+                except CalledProcessError:
+                    pass
+                except FileNotFoundError:
+                    pass
 
     async def create_overlay_network(self, network_name: str) -> None:
         if not self.heartbeat_extra_info['swarm_enabled']:
             raise RuntimeError("This agent has not joined to a swarm cluster.")
-        await self.docker.networks.create({
-            'Name': network_name,
-            'Driver': 'overlay',
-            'Attachable': True,
-            'Labels': {
-                'ai.backend.cluster-network': '1'
-            }
-        })
+        async with closing_async(Docker()) as docker:
+            await docker.networks.create({
+                'Name': network_name,
+                'Driver': 'overlay',
+                'Attachable': True,
+                'Labels': {
+                    'ai.backend.cluster-network': '1'
+                }
+            })
 
     async def destroy_overlay_network(self, network_name: str) -> None:
-        network = await self.docker.networks.get(network_name)
-        await network.delete()
+        docker = Docker()
+        try:
+            network = await docker.networks.get(network_name)
+            await network.delete()
+        finally:
+            await docker.close()
 
     async def create_local_network(self, network_name: str) -> None:
-        await self.docker.networks.create({
-            'Name': network_name,
-            'Driver': 'bridge',
-            'Labels': {
-                'ai.backend.cluster-network': '1'
-            }
-        })
+        async with closing_async(Docker()) as docker:
+            await docker.networks.create({
+                'Name': network_name,
+                'Driver': 'bridge',
+                'Labels': {
+                    'ai.backend.cluster-network': '1'
+                }
+            })
 
     async def destroy_local_network(self, network_name: str) -> None:
-        network = await self.docker.networks.get(network_name)
-        await network.delete()
+        async with closing_async(Docker()) as docker:
+            network = await docker.networks.get(network_name)
+            await network.delete()
 
     async def monitor_docker_events(self):
 
@@ -1246,40 +1268,44 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
             )
 
         while True:
-            subscriber = self.docker.events.subscribe(create_task=True)
-            try:
-                while True:
-                    try:
-                        # ref: https://docs.docker.com/engine/api/v1.40/#operation/SystemEvents
-                        evdata = await subscriber.get()
-                        if evdata is None:
-                            # Break out to the outermost loop when the connection is closed
-                            log.info("monitor_docker_events(): restarting aiodocker event subscriber")
-                            break
-                        if evdata['Type'] != 'container':
-                            # Our interest is the container-related events
-                            continue
-                        container_name = evdata['Actor']['Attributes']['name']
-                        kernel_id = await get_kernel_id_from_container(container_name)
-                        if kernel_id is None:
-                            continue
-                        if (
-                            self.local_config['debug']['log-docker-events']
-                            and evdata['Action'] in ('start', 'die')
-                        ):
-                            log.debug('docker-event: action={}, actor={}',
-                                      evdata['Action'], evdata['Actor'])
-                        if evdata['Action'] == 'start':
-                            await asyncio.shield(handle_action_start(kernel_id, evdata))
-                        elif evdata['Action'] == 'die':
-                            await asyncio.shield(handle_action_die(kernel_id, evdata))
-                    except asyncio.CancelledError:
-                        # We are shutting down...
-                        return
-                    except Exception:
-                        log.exception("monitor_docker_events(): unexpected error")
-            finally:
-                await asyncio.shield(self.docker.events.stop())
+            async with closing_async(Docker()) as docker:
+                subscriber = docker.events.subscribe(create_task=True)
+                try:
+                    while True:
+                        try:
+                            # ref: https://docs.docker.com/engine/api/v1.40/#operation/SystemEvents
+                            evdata = await subscriber.get()
+                            if evdata is None:
+                                # Break out to the outermost loop when the connection is closed
+                                log.info(
+                                    "monitor_docker_events(): "
+                                    "restarting aiodocker event subscriber"
+                                )
+                                break
+                            if evdata['Type'] != 'container':
+                                # Our interest is the container-related events
+                                continue
+                            container_name = evdata['Actor']['Attributes']['name']
+                            kernel_id = await get_kernel_id_from_container(container_name)
+                            if kernel_id is None:
+                                continue
+                            if (
+                                self.local_config['debug']['log-docker-events']
+                                and evdata['Action'] in ('start', 'die')
+                            ):
+                                log.debug('docker-event: action={}, actor={}',
+                                          evdata['Action'], evdata['Actor'])
+                            if evdata['Action'] == 'start':
+                                await asyncio.shield(handle_action_start(kernel_id, evdata))
+                            elif evdata['Action'] == 'die':
+                                await asyncio.shield(handle_action_die(kernel_id, evdata))
+                        except asyncio.CancelledError:
+                            # We are shutting down...
+                            return
+                        except Exception:
+                            log.exception("monitor_docker_events(): unexpected error")
+                finally:
+                    await asyncio.shield(docker.events.stop())
 
     def _kernel_resource_spec_read(self, filename):
         with open(filename, 'r') as f:

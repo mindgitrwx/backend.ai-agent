@@ -44,7 +44,7 @@ from ..stats import (
     StatContext, NodeMeasurement, ContainerMeasurement,
     StatModes, MetricTypes, Measurement,
 )
-from ..utils import read_sysfs
+from ..utils import closing_async, read_sysfs
 from ..vendor.linux import libnuma
 
 log = BraceStyleAdapter(logging.getLogger(__name__))
@@ -188,16 +188,17 @@ class CPUPlugin(AbstractComputePlugin):
             return cpu_used
 
         async def api_impl(container_id):
-            container = DockerContainer(ctx.agent.docker, id=container_id)
-            try:
-                async with async_timeout.timeout(2.0):
-                    ret = await fetch_api_stats(container)
-            except asyncio.TimeoutError:
-                return None
-            if ret is None:
-                return None
-            cpu_used = nmget(ret, 'cpu_stats.cpu_usage.total_usage', 0) / 1e6
-            return cpu_used
+            async with closing_async(Docker()) as docker:
+                container = DockerContainer(docker, id=container_id)
+                try:
+                    async with async_timeout.timeout(2.0):
+                        ret = await fetch_api_stats(container)
+                except asyncio.TimeoutError:
+                    return None
+                if ret is None:
+                    return None
+                cpu_used = nmget(ret, 'cpu_stats.cpu_usage.total_usage', 0) / 1e6
+                return cpu_used
 
         if ctx.mode == StatModes.CGROUP:
             impl = sysfs_impl
@@ -463,26 +464,27 @@ class MemoryPlugin(AbstractComputePlugin):
             return mem_cur_bytes, io_read_bytes, io_write_bytes, scratch_sz
 
         async def api_impl(container_id):
-            container = DockerContainer(ctx.agent.docker, id=container_id)
-            try:
-                async with async_timeout.timeout(2.0):
-                    ret = await fetch_api_stats(container)
-            except asyncio.TimeoutError:
-                return None
-            if ret is None:
-                return None
-            mem_cur_bytes = nmget(ret, 'memory_stats.usage', 0)
-            io_read_bytes = 0
-            io_write_bytes = 0
-            for item in nmget(ret, 'blkio_stats.io_service_bytes_recursive', []):
-                if item['op'] == 'Read':
-                    io_read_bytes += item['value']
-                elif item['op'] == 'Write':
-                    io_write_bytes += item['value']
-            loop = current_loop()
-            scratch_sz = await loop.run_in_executor(
-                None, get_scratch_size, container_id)
-            return mem_cur_bytes, io_read_bytes, io_write_bytes, scratch_sz
+            async with closing_async(Docker()) as docker:
+                container = DockerContainer(docker, id=container_id)
+                try:
+                    async with async_timeout.timeout(2.0):
+                        ret = await fetch_api_stats(container)
+                except asyncio.TimeoutError:
+                    return None
+                if ret is None:
+                    return None
+                mem_cur_bytes = nmget(ret, 'memory_stats.usage', 0)
+                io_read_bytes = 0
+                io_write_bytes = 0
+                for item in nmget(ret, 'blkio_stats.io_service_bytes_recursive', []):
+                    if item['op'] == 'Read':
+                        io_read_bytes += item['value']
+                    elif item['op'] == 'Write':
+                        io_write_bytes += item['value']
+                loop = current_loop()
+                scratch_sz = await loop.run_in_executor(
+                    None, get_scratch_size, container_id)
+                return mem_cur_bytes, io_read_bytes, io_write_bytes, scratch_sz
 
         if ctx.mode == StatModes.CGROUP:
             impl = sysfs_impl
