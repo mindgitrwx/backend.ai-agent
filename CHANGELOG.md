@@ -16,6 +16,14 @@ Changes
 
 .. towncrier release notes start
 
+21.03.12 (2021-09-15)
+---------------------
+
+### Fixes
+* Update the runner binaries to drop Ubuntu 16.04 support in libbaihook and use the latest build options ([#306](https://github.com/lablup/backend.ai-agent/issues/306))
+* Fix a random hang for Docker API invocations by recreating aiohttp sessions to avoid keepalive/connection pooling issues ([#308](https://github.com/lablup/backend.ai-agent/issues/308))
+
+
 21.03.11 (2021-09-03)
 ---------------------
 
