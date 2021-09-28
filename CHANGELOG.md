@@ -16,6 +16,14 @@ Changes
 
 .. towncrier release notes start
 
+21.03.13 (2021-09-28)
+---------------------
+
+### Fixes
+* Fix invalid CPU Utilization rate being displayed ([#311](https://github.com/lablup/backend.ai-agent/issues/311))
+  - NOTE: Production deployments with a license server should be updated with the license activator plugin v1.1.4 or later.
+
+
 21.03.12 (2021-09-15)
 ---------------------
 
