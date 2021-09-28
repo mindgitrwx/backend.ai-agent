@@ -222,7 +222,7 @@ class CPUPlugin(AbstractComputePlugin):
                 MetricKey('cpu_util'),
                 MetricTypes.UTILIZATION,
                 unit_hint='percent',
-                current_hook=lambda metric: metric.stats.diff,
+                current_hook=lambda metric: metric.stats.rate,
                 stats_filter=frozenset({'avg', 'max'}),
                 per_container=per_container_cpu_used,
             ),
