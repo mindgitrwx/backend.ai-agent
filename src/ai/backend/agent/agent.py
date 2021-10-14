@@ -566,20 +566,13 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         self.resource_lock = asyncio.Lock()
         self.container_lifecycle_queue = asyncio.Queue()
 
-        host, port = self.local_config['redis']['addr'].as_sockaddr()
-        password = (self.local_config['redis']['password']
-                        if self.local_config['redis']['password'] else None)
-        if password := self.local_config['redis']['password']:
-            redis_base_url = f'redis://:{password}@{host}:{port}'
-        else:
-            redis_base_url = f'redis://{host}:{port}'
-
         self.event_producer = await EventProducer.new(
-            aioredis.from_url(redis_base_url + '?db=4'),
+            self.local_config['redis'],
+            db=4,
             log_events=self.local_config['debug']['log-events'],
         )
-        self.redis_stream_pool = aioredis.from_url(redis_base_url + '?db=4')
-        self.redis_stat_pool = aioredis.from_url(redis_base_url + '?db=0')
+        self.redis_stream_pool = redis.get_redis_object(self.local_config['redis'], db=4)
+        self.redis_stat_pool = redis.get_redis_object(self.local_config['redis'], db=0)
 
         ipc_base_path.mkdir(parents=True, exist_ok=True)
         self.zmq_ctx = zmq.asyncio.Context()
@@ -639,7 +632,6 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
 
         # Notify the gateway.
         await self.produce_event(AgentTerminatedEvent(reason="shutdown"))
-
 
         self.zmq_ctx.term()
 
