@@ -16,6 +16,21 @@ Changes
 
 .. towncrier release notes start
 
+## 21.09.0a2 (2021-09-28)
+
+### Features
+* Auto-detect and configure Docker container creation parameters to support RDMA acceleration ([#300](https://github.com/lablup/backend.ai-agent/issues/300))
+* Allow overriding of Docker container creation configs using a local JSON file (`agent-docker-container-opts.json` in the same location of `agent.toml` file) to allow monkey-patching them without restarting or redeploying the agents in running clusters ([#301](https://github.com/lablup/backend.ai-agent/issues/301))
+* Allow overriding shell environment variable from image label ([#302](https://github.com/lablup/backend.ai-agent/issues/302))
+* Add a new "advertised-host" config to `agent.toml` and rename the "kernel-host" option to "bind-host". ([#309](https://github.com/lablup/backend.ai-agent/issues/309))
+
+### Fixes
+* Add experimental support for Backend.AI on Kubernetes ([#142](https://github.com/lablup/backend.ai-agent/issues/142))
+* Improve macOS support by removing small but critical bugs related to path handling ([#305](https://github.com/lablup/backend.ai-agent/issues/305))
+* Fix aarch64 binaries crashing when creating new session on aarch64 machin ([#306](https://github.com/lablup/backend.ai-agent/issues/306))
+* Fix a random hang for Docker API invocations by recreating aiohttp sessions to avoid keepalive/connection pooling issues ([#308](https://github.com/lablup/backend.ai-agent/issues/308))
+* Fix invalid CPU Utilization rate being displayed ([#311](https://github.com/lablup/backend.ai-agent/issues/311))
+
 
 ## 21.09.0a1 (2021-08-25)
 

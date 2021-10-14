@@ -9,11 +9,19 @@ from pathlib import Path
 import platform
 import re
 from typing import (
-    Any, Optional,
+    Any,
+    AsyncContextManager,
     Iterable,
-    Mapping, MutableMapping,
-    List, Sequence, Tuple, Union,
-    Type, overload,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Protocol,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    overload,
 )
 from typing_extensions import Final
 from uuid import UUID
@@ -41,6 +49,30 @@ NotContainerPID: Final = ContainerPID(PID(-1))
 NotHostPID: Final = HostPID(PID(-1))
 
 
+class SupportsAsyncClose(Protocol):
+    async def close(self) -> None:
+        ...
+
+
+_SupportsAsyncCloseT = TypeVar('_SupportsAsyncCloseT', bound=SupportsAsyncClose)
+
+
+class closing_async(AsyncContextManager[_SupportsAsyncCloseT]):
+    """
+    contextlib.closing calls close(), and aiotools.aclosing() calls aclose().
+    This context manager calls close() as a coroutine.
+    """
+
+    def __init__(self, obj: _SupportsAsyncCloseT) -> None:
+        self.obj = obj
+
+    async def __aenter__(self) -> _SupportsAsyncCloseT:
+        return self.obj
+
+    async def __aexit__(self, *exc_info) -> None:
+        await self.obj.close()
+
+
 def generate_local_instance_id(hint: str) -> str:
     return hashlib.md5(hint.encode('utf-8')).hexdigest()[:12]
 
@@ -65,8 +97,8 @@ def update_nested_dict(dest: MutableMapping, additions: Mapping) -> None:
             if isinstance(dest[k], MutableMapping):
                 assert isinstance(v, MutableMapping)
                 update_nested_dict(dest[k], v)
-            elif isinstance(dest[k], Sequence):
-                assert isinstance(v, Sequence)
+            elif isinstance(dest[k], List):
+                assert isinstance(v, List)
                 dest[k].extend(v)
             else:
                 dest[k] = v

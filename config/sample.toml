@@ -69,7 +69,12 @@ kernel-gid = -1
 # to the current host.
 # For mobile environments such as developer laptops which roam around different networks,
 # it is HIGHLY RECOMMENDED to set this to "127.0.0.1" manually.
-# kernel-host = "127.0.0.1"   # env: BACKEND_KERNEL_HOST_OVERRIDE
+# bind-host = "127.0.0.1"   # env: BACKEND_KERNEL_HOST_OVERRIDE
+
+# Alias string to tell manager as a "kernel-host" value.
+# Useful when wsproxy can't access kernel with bind-host IP.
+# Optional, defaults to "bind-host" value when not specified.
+# advertised-host ""
 
 # One of: "docker", "cgroup"
 # "docker" uses the Docker API to retrieve container statistics.

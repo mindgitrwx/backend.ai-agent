@@ -11,7 +11,7 @@ from aiodocker.exceptions import DockerError
 
 from ai.backend.common.logging import BraceStyleAdapter
 
-from ..utils import get_arch_name, update_nested_dict
+from ..utils import closing_async, get_arch_name, update_nested_dict
 
 log = BraceStyleAdapter(logging.getLogger(__name__))
 
@@ -20,13 +20,11 @@ class PersistentServiceContainer:
 
     def __init__(
         self,
-        docker: Docker,
         image_ref: str,
         container_config: Mapping[str, Any],
         *,
         name: str = None,
     ) -> None:
-        self.docker = docker
         self.image_ref = image_ref
         arch = get_arch_name()
         default_container_name = image_ref.split(':')[0].rsplit('/', maxsplit=1)[-1]
@@ -45,14 +43,15 @@ class PersistentServiceContainer:
         ))
 
     async def get_container_version_and_status(self) -> Tuple[int, bool]:
-        try:
-            c = self.docker.containers.container(self.container_name)
-            await c.show()
-        except DockerError as e:
-            if e.status == 404:
-                return 0, False
-            else:
-                raise
+        async with closing_async(Docker()) as docker:
+            try:
+                c = docker.containers.container(self.container_name)
+                await c.show()
+            except DockerError as e:
+                if e.status == 404:
+                    return 0, False
+                else:
+                    raise
         if c['Config'].get('Labels', {}).get('ai.backend.system', '0') != '1':
             raise RuntimeError(
                 f"An existing container named \"{c['Name'].lstrip('/')}\" is not a system container "
@@ -63,13 +62,14 @@ class PersistentServiceContainer:
         )
 
     async def get_image_version(self) -> int:
-        try:
-            img = await self.docker.images.inspect(self.image_ref)
-        except DockerError as e:
-            if e.status == 404:
-                return 0
-            else:
-                raise
+        async with closing_async(Docker()) as docker:
+            try:
+                img = await docker.images.inspect(self.image_ref)
+            except DockerError as e:
+                if e.status == 404:
+                    return 0
+                else:
+                    raise
         return int(img['Config'].get('Labels', {}).get('ai.backend.version', '0'))
 
     async def ensure_running_latest(self) -> None:
@@ -107,35 +107,37 @@ class PersistentServiceContainer:
                 )
 
     async def recreate(self) -> None:
-        try:
-            c = self.docker.containers.container(self.container_name)
-            await c.stop()
-            await c.delete(force=True)
-        except DockerError as e:
-            if e.status == 409 and 'is not running' in e.message:
-                pass
-            elif e.status == 404:
-                pass
-            else:
-                raise
-        container_config = {
-            'Image': self.image_ref,
-            'Tty': True,
-            'Privileged': False,
-            'AttachStdin': False,
-            'AttachStdout': False,
-            'AttachStderr': False,
-            'HostConfig': {
-                'Init': True,
-                'RestartPolicy': {
-                    'Name': 'unless-stopped',  # make it persistent
-                    'MaximumRetryCount': 0,
+        async with closing_async(Docker()) as docker:
+            try:
+                c = docker.containers.container(self.container_name)
+                await c.stop()
+                await c.delete(force=True)
+            except DockerError as e:
+                if e.status == 409 and 'is not running' in e.message:
+                    pass
+                elif e.status == 404:
+                    pass
+                else:
+                    raise
+            container_config = {
+                'Image': self.image_ref,
+                'Tty': True,
+                'Privileged': False,
+                'AttachStdin': False,
+                'AttachStdout': False,
+                'AttachStderr': False,
+                'HostConfig': {
+                    'Init': True,
+                    'RestartPolicy': {
+                        'Name': 'unless-stopped',  # make it persistent
+                        'MaximumRetryCount': 0,
+                    },
                 },
-            },
-        }
-        update_nested_dict(container_config, self.container_config)
-        await self.docker.containers.create(config=container_config, name=self.container_name)
+            }
+            update_nested_dict(container_config, self.container_config)
+            await docker.containers.create(config=container_config, name=self.container_name)
 
     async def start(self) -> None:
-        c = self.docker.containers.container(self.container_name)
-        await c.start()
+        async with closing_async(Docker()) as docker:
+            c = docker.containers.container(self.container_name)
+            await c.start()

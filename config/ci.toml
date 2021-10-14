@@ -17,7 +17,7 @@ event-loop = "asyncio"
 [container]
 port-range = [30000, 31000]
 kernel-uid = -1
-kernel-host = "127.0.0.1"
+bind-host = "127.0.0.1"
 sandbox-type = "docker"
 jail-args = []
 scratch-type = "hostdir"

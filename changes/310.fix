@@ -1,0 +1,1 @@
+Fix a missing update for renaming `kernel-host` to `bind-host` in the initialization codes that auto-fills the value when not specified and let it show an explicit warning if the legacy `kernel-host` key is configured

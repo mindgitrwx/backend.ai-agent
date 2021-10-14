@@ -36,7 +36,8 @@ agent_local_config_iv = t.Dict({
     t.Key('container'): t.Dict({
         t.Key('kernel-uid', default=-1): tx.UserID,
         t.Key('kernel-gid', default=-1): tx.GroupID,
-        t.Key('kernel-host', default=''): t.String(allow_blank=True),
+        t.Key('bind-host', default=''): t.String(allow_blank=True),
+        t.Key('advertised-host', default=None): t.Null | t.String(),
         t.Key('port-range', default=(30000, 31000)): tx.PortRange,
         t.Key('stats-type', default='docker'):
             t.Null | t.Enum(*[e.value for e in StatModes]),

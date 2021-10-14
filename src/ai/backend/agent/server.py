@@ -602,13 +602,19 @@ async def server_main(
             await identity.get_instance_ip(subnet_hint),
             rpc_addr.port,
         )
-    if not local_config['container']['kernel-host']:
-        log.debug('auto-detecting kernel host')
-        local_config['container']['kernel-host'] = await get_subnet_ip(
-            etcd, 'container', local_config['agent']['rpc-listen-addr'].host
+    if 'kernel-host' in local_config['container']:
+        log.warning("The configuration parameter `container.kernel-host` is deprecated; "
+                    "use `container.bind-host` instead!")
+        # fallback for legacy configs
+        local_config['container']['bind-host'] = local_config['container']['kernel-host']
+    if not local_config['container']['bind-host']:
+        log.debug("auto-detecting `container.bind-host` from container subnet config "
+                  "and agent.rpc-listen-addr")
+        local_config['container']['bind-host'] = await get_subnet_ip(
+            etcd, 'container', fallback_addr=local_config['agent']['rpc-listen-addr'].host
         )
     log.info('Agent external IP: {}', local_config['agent']['rpc-listen-addr'].host)
-    log.info('Container external IP: {}', local_config['container']['kernel-host'])
+    log.info('Container external IP: {}', local_config['container']['bind-host'])
     if not local_config['agent']['region']:
         local_config['agent']['region'] = await identity.get_instance_region()
     log.info('Node ID: {0} (machine-type: {1}, host: {2})',
@@ -674,8 +680,8 @@ def main(
     config.override_with_env(raw_cfg, ('agent', 'pid-file'), 'BACKEND_PID_FILE')
     config.override_with_env(raw_cfg, ('container', 'port-range'),
                              'BACKEND_CONTAINER_PORT_RANGE')
-    config.override_with_env(raw_cfg, ('container', 'kernel-host'),
-                             'BACKEND_KERNEL_HOST_OVERRIDE')
+    config.override_with_env(raw_cfg, ('container', 'bind-host'),
+                             'BACKEND_BIND_HOST_OVERRIDE')
     config.override_with_env(raw_cfg, ('container', 'sandbox-type'), 'BACKEND_SANDBOX_TYPE')
     config.override_with_env(raw_cfg, ('container', 'scratch-root'), 'BACKEND_SCRATCH_ROOT')
     if debug:
