@@ -574,12 +574,8 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         else:
             redis_base_url = f'redis://{host}:{port}'
 
-
-        def connect_redis_event_db() -> aioredis.ConnectionPool:            
-            return aioredis.ConnectionPool.from_url(redis_base_url + '?db=4')
-
         self.event_producer = await EventProducer.new(
-            connect_redis_event_db,
+            aioredis.from_url(redis_base_url + '?db=4'),
             log_events=self.local_config['debug']['log-events'],
         )
         self.redis_stream_pool = aioredis.from_url(redis_base_url + '?db=4')
