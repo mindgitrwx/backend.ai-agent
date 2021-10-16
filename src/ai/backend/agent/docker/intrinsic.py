@@ -102,7 +102,7 @@ class CPUPlugin(AbstractComputePlugin):
 
     key = DeviceName('cpu')
     slot_types = [
-        (SlotName('cpu'), SlotTypes.COUNT)
+        (SlotName('cpu'), SlotTypes.COUNT),
     ]
 
     async def init(self, context: Any = None) -> None:
@@ -262,7 +262,7 @@ class CPUPlugin(AbstractComputePlugin):
                 'Cpus': ','.join(sorted_core_ids),
                 'CpusetCpus': ','.join(sorted_core_ids),
                 # 'CpusetMems': f'{resource_spec.numa_node}',
-            }
+            },
         }
 
     async def restore_from_container(
@@ -315,7 +315,7 @@ class MemoryPlugin(AbstractComputePlugin):
 
     key = DeviceName('mem')
     slot_types = [
-        (SlotName('mem'), SlotTypes.BYTES)
+        (SlotName('mem'), SlotTypes.BYTES),
     ]
 
     async def init(self, context: Any = None) -> None:
@@ -566,7 +566,7 @@ class MemoryPlugin(AbstractComputePlugin):
             'HostConfig': {
                 'MemorySwap': int(memory),  # prevent using swap!
                 'Memory': int(memory),
-            }
+            },
         }
 
     async def restore_from_container(

@@ -16,7 +16,7 @@ async def create_scratch_filesystem(scratch_dir, size):
         'mount',
         '-t', 'tmpfs',
         '-o', f'size={size}M',
-        'tmpfs', f'{scratch_dir}'
+        'tmpfs', f'{scratch_dir}',
     ])
     exit_code = await proc.wait()
 
@@ -33,7 +33,7 @@ async def destroy_scratch_filesystem(scratch_dir):
     '''
     proc = await asyncio.create_subprocess_exec(*[
         'umount',
-        f'{scratch_dir}'
+        f'{scratch_dir}',
     ])
     exit_code = await proc.wait()
 

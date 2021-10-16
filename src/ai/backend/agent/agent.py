@@ -172,8 +172,8 @@ class AbstractKernelCreationContext(aobject, Generic[KernelObjectType]):
         kernel_config: KernelCreationConfig,
         local_config: Mapping[str, Any],
         computers: MutableMapping[str, ComputerContext],
-        restarting: bool = False
-    ):
+        restarting: bool = False,
+    ) -> None:
         self.image_labels = kernel_config['image']['labels']
         self.kspec_version = int(self.image_labels.get('ai.backend.kernelspec', '1'))
         self.kernel_features = frozenset(self.image_labels.get('ai.backend.features', '').split())
@@ -243,7 +243,7 @@ class AbstractKernelCreationContext(aobject, Generic[KernelObjectType]):
         target: Union[str, Path],
         perm: Literal['ro', 'rw'] = 'ro',
         is_unmanaged: bool = False,
-        opts: Mapping[str, Any] = None
+        opts: Mapping[str, Any] = None,
     ):
         """
         Return mount object to mount target krunner file/folder/volume.
@@ -358,18 +358,18 @@ class AbstractKernelCreationContext(aobject, Generic[KernelObjectType]):
     async def mount_krunner(
         self,
         resource_spec: KernelResourceSpec,
-        environ: MutableMapping[str, str]
+        environ: MutableMapping[str, str],
     ) -> None:
 
         def _mount(
             type, src, dst,
-            is_unmanaged=False
+            is_unmanaged=False,
         ):
             resource_spec.mounts.append(
                 self.get_runner_mount(
                     type, src, dst,
-                    MountPermission('ro'), is_unmanaged=is_unmanaged
-                )
+                    MountPermission('ro'), is_unmanaged=is_unmanaged,
+                ),
             )
 
         # Inject Backend.AI kernel runner dependencies.
@@ -712,7 +712,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                 'compute_plugins': {
                     key: {
                         'version': computer.instance.get_version(),
-                        **(await computer.instance.extra_info())
+                        **(await computer.instance.extra_info()),
                     }
                     for key, computer in self.computers.items()
                 },
@@ -750,7 +750,8 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                         stored_chunk = bytes(cb[:chunk_size])
                         await redis.execute_with_retries(
                             lambda: self.redis_stream_pool.rpush(
-                                log_key, stored_chunk)
+                                log_key, stored_chunk,
+                            ),
                         )
                         remaining = cb[chunk_size:]
                         chunk_length = len(remaining)
@@ -763,7 +764,8 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             if chunk_length > 0:
                 await redis.execute_with_retries(
                     lambda: self.redis_stream_pool.rpush(
-                        log_key, chunk_buffer.getvalue())
+                        log_key, chunk_buffer.getvalue(),
+                    ),
                 )
         finally:
             chunk_buffer.close()
@@ -772,7 +774,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         # for cases when the event delivery has failed or processing
         # the log data has failed.
         await redis.execute_with_retries(
-            lambda: self.redis_stream_pool.expire(log_key, 3600.0)
+            lambda: self.redis_stream_pool.expire(log_key, 3600.0),
         )
         await self.produce_event(DoSyncKernelLogsEvent(kernel_id, container_id))
 
@@ -829,7 +831,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                     await self.rescan_resource_usage()
                     if not ev.suppress_events:
                         await self.produce_event(
-                            KernelTerminatedEvent(ev.kernel_id, "already-terminated")
+                            KernelTerminatedEvent(ev.kernel_id, "already-terminated"),
                         )
                     return
                 else:
@@ -840,7 +842,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                             LifecycleEvent.CLEAN,
                             ev.reason,
                             suppress_events=ev.suppress_events,
-                        )
+                        ),
                     )
             else:
                 kernel_obj.stats_enabled = False
@@ -887,7 +889,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                     # may not belong to the new port range.
                     restored_ports = [*filter(
                         lambda p: port_range[0] <= p <= port_range[1],
-                        kernel_obj['host_ports']
+                        kernel_obj['host_ports'],
                     )]
                     self.port_pool.update(restored_ports)
                     await kernel_obj.close()
@@ -906,7 +908,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                     await self.rescan_resource_usage()
                     if not ev.suppress_events:
                         await self.produce_event(
-                            KernelTerminatedEvent(ev.kernel_id, ev.reason)
+                            KernelTerminatedEvent(ev.kernel_id, ev.reason),
                         )
                 self.terminating_kernels.discard(ev.kernel_id)
 
@@ -974,7 +976,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                 done_event,
                 exit_code,
                 suppress_events,
-            )
+            ),
         )
 
     @abstractmethod
@@ -1079,7 +1081,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
     @abstractmethod
     async def detect_resources(self) -> Tuple[
         Mapping[DeviceName, AbstractComputePlugin],
-        Mapping[SlotName, Decimal]
+        Mapping[SlotName, Decimal],
     ]:
         """
         Scan and define the amount of available resource slots in this node.
@@ -1093,7 +1095,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         tasks = []
 
         async def _get(
-            key: str, plugin: AbstractComputePlugin
+            key: str, plugin: AbstractComputePlugin,
         ) -> Tuple[str, Union[Exception, HardwareMetadata]]:
             try:
                 result = await plugin.get_node_hwinfo()
@@ -1233,23 +1235,23 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                         api_version=3)
                 except KeyError:
                     await self.produce_event(
-                        KernelTerminatedEvent(kernel_id, "self-terminated")
+                        KernelTerminatedEvent(kernel_id, "self-terminated"),
                     )
                     break
 
                 if result['status'] == 'finished':
                     if result['exitCode'] == 0:
                         await self.produce_event(
-                            SessionSuccessEvent(SessionId(kernel_id), "task-done", 0)
+                            SessionSuccessEvent(SessionId(kernel_id), "task-done", 0),
                         )
                     else:
                         await self.produce_event(
-                            SessionFailureEvent(SessionId(kernel_id), "task-failed", result['exitCode'])
+                            SessionFailureEvent(SessionId(kernel_id), "task-failed", result['exitCode']),
                         )
                     break
                 if result['status'] == 'exec-timeout':
                     await self.produce_event(
-                        SessionFailureEvent(SessionId(kernel_id), "task-timeout", -2)
+                        SessionFailureEvent(SessionId(kernel_id), "task-timeout", -2),
                     )
                     break
                 opts = {
@@ -1258,7 +1260,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                 mode = 'continue'
         except asyncio.CancelledError:
             await self.produce_event(
-                SessionFailureEvent(SessionId(kernel_id), "task-cancelled", -2)
+                SessionFailureEvent(SessionId(kernel_id), "task-cancelled", -2),
             )
 
     async def create_kernel(
@@ -1277,7 +1279,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
 
         if not restarting:
             await self.produce_event(
-                KernelPreparingEvent(kernel_id, creation_id)
+                KernelPreparingEvent(kernel_id, creation_id),
             )
 
         # Initialize the creation context
@@ -1296,7 +1298,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             environ['LOCAL_USER_ID'] = str(uid)
             environ['LOCAL_GROUP_ID'] = str(gid)
         environ.update(
-            await ctx.get_extra_envs()
+            await ctx.get_extra_envs(),
         )
         image_labels = kernel_config['image']['labels']
 
@@ -1308,13 +1310,13 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         )
         if do_pull:
             await self.produce_event(
-                KernelPullingEvent(kernel_id, creation_id, ctx.image_ref.canonical)
+                KernelPullingEvent(kernel_id, creation_id, ctx.image_ref.canonical),
             )
             await self.pull_image(ctx.image_ref, kernel_config['image']['registry'])
 
         if not restarting:
             await self.produce_event(
-                KernelCreatingEvent(kernel_id, creation_id)
+                KernelCreatingEvent(kernel_id, creation_id),
             )
 
         # Get the resource spec from existing kernel scratches
@@ -1326,7 +1328,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
 
         # Mount backend-specific intrinsic mounts (e.g., scratch directories)
         resource_spec.mounts.extend(
-            await ctx.get_intrinsic_mounts()
+            await ctx.get_intrinsic_mounts(),
         )
 
         # Realize ComputeDevice (including accelerators) allocations.
@@ -1356,7 +1358,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                             "resource allocation failed ({}): {} of {}\n"
                             "(alloc map: {})",
                             type(e).__name__, device_specific_slots, dev_name,
-                            dict(computer_set.alloc_map.allocations)
+                            dict(computer_set.alloc_map.allocations),
                         )
                         raise
 
@@ -1499,14 +1501,14 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
 
         # Finally we are done.
         await self.produce_event(
-            KernelStartedEvent(kernel_id, creation_id)
+            KernelStartedEvent(kernel_id, creation_id),
         )
 
         if kernel_config['session_type'] == 'batch' and kernel_config['cluster_role'] == 'main':
             self._ongoing_exec_batch_tasks.add(
                 asyncio.create_task(
-                    self.execute_batch(kernel_id, kernel_config['startup_command'] or "")
-                )
+                    self.execute_batch(kernel_id, kernel_config['startup_command'] or ""),
+                ),
             )
 
         # The startup command for the batch-type sessions will be executed by the manager
@@ -1642,14 +1644,14 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             self.restarting_kernels[kernel_id] = tracker
 
         existing_kernel_config = pickle.loads(
-            await self.restart_kernel__load_config(kernel_id, 'kconfig.dat')
+            await self.restart_kernel__load_config(kernel_id, 'kconfig.dat'),
         )
         existing_cluster_info = json.loads(
-            await self.restart_kernel__load_config(kernel_id, 'cluster.json')
+            await self.restart_kernel__load_config(kernel_id, 'cluster.json'),
         )
         kernel_config = cast(
             KernelCreationConfig,
-            {**existing_kernel_config, **updating_kernel_config}
+            {**existing_kernel_config, **updating_kernel_config},
         )
         async with tracker.request_lock:
             tracker.done_event.clear()
@@ -1714,7 +1716,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             await restart_tracker.done_event.wait()
 
         await self.produce_event(
-            ExecutionStartedEvent(SessionId(kernel_id))
+            ExecutionStartedEvent(SessionId(kernel_id)),
         )
         try:
             kernel_obj = self.kernel_registry[kernel_id]
@@ -1725,7 +1727,7 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                 api_version=api_version)
         except asyncio.CancelledError:
             await self.produce_event(
-                ExecutionCancelledEvent(SessionId(kernel_id))
+                ExecutionCancelledEvent(SessionId(kernel_id)),
             )
             raise
         except KeyError:
@@ -1737,11 +1739,11 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
             log.debug('_execute({0}) {1}', kernel_id, result['status'])
         if result['status'] == 'finished':
             await self.produce_event(
-                ExecutionFinishedEvent(SessionId(kernel_id))
+                ExecutionFinishedEvent(SessionId(kernel_id)),
             )
         elif result['status'] == 'exec-timeout':
             await self.produce_event(
-                ExecutionTimeoutEvent(SessionId(kernel_id))
+                ExecutionTimeoutEvent(SessionId(kernel_id)),
             )
             await self.inject_container_lifecycle_event(
                 kernel_id,

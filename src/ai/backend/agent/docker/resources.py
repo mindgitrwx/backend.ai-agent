@@ -16,7 +16,7 @@ from ai.backend.common.types import (
 )
 from ..exception import InitializationError
 from ..resources import (
-    AbstractComputePlugin, ComputePluginContext, KernelResourceSpec, known_slot_types
+    AbstractComputePlugin, ComputePluginContext, KernelResourceSpec, known_slot_types,
 )
 
 log = BraceStyleAdapter(logging.getLogger(__name__))

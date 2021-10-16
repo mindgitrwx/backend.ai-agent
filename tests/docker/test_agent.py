@@ -68,13 +68,13 @@ query_digest = "sha256:b00000000000000000000000000000000000000000000000000000000
 digest_matching_image_info = {
     "Id": "sha256:b000000000000000000000000000000000000000000000000000000000000001",
     "RepoTags": [
-        "lablup/lua:5.3-alpine3.8"
+        "lablup/lua:5.3-alpine3.8",
     ],
 }
 digest_mismatching_image_info = {
     "Id": "sha256:a000000000000000000000000000000000000000000000000000000000000002",
     "RepoTags": [
-        "lablup/lua:5.3-alpine3.8"
+        "lablup/lua:5.3-alpine3.8",
     ],
 }
 

@@ -234,13 +234,13 @@ class AgentRPCServer(aobject):
     async def read_agent_config(self):
         # Fill up Redis configs from etcd.
         self.local_config['redis'] = config.redis_config_iv.check(
-            await self.etcd.get_prefix('config/redis')
+            await self.etcd.get_prefix('config/redis'),
         )
         log.info('configured redis_addr: {0}', self.local_config['redis']['addr'])
 
         # Fill up vfolder configs from etcd.
         self.local_config['vfolder'] = config.vfolder_config_iv.check(
-            await self.etcd.get_prefix('volumes')
+            await self.etcd.get_prefix('volumes'),
         )
         if self.local_config['vfolder']['mount'] is None:
             log.info('assuming use of storage-proxy since vfolder mount path is not configured in etcd')
@@ -250,7 +250,7 @@ class AgentRPCServer(aobject):
 
         # Fill up shared agent configurations from etcd.
         agent_etcd_config = agent_etcd_config_iv.check(
-            await self.etcd.get_prefix('config/agent')
+            await self.etcd.get_prefix('config/agent'),
         )
         for k, v in agent_etcd_config.items():
             self.local_config['agent'][k] = v
@@ -259,7 +259,7 @@ class AgentRPCServer(aobject):
         # Fill up global container configurations from etcd.
         try:
             container_etcd_config = container_etcd_config_iv.check(
-                await self.etcd.get_prefix('config/container')
+                await self.etcd.get_prefix('config/container'),
             )
         except TrafaretDataError as etrafa:
             log.warning("etcd: container-config error: {}".format(etrafa))
@@ -434,7 +434,7 @@ class AgentRPCServer(aobject):
             code,
             opts=opts,
             api_version=api_version,
-            flush_timeout=flush_timeout
+            flush_timeout=flush_timeout,
         )
         return result
 
@@ -458,7 +458,7 @@ class AgentRPCServer(aobject):
         self,
         kernel_id,   # type: str
         service,     # type: str
-        opts         # type: Dict[str, Any]
+        opts,        # type: Dict[str, Any]
     ):
         # type: (...) -> Dict[str, Any]
         log.info('rpc::start_service(k:{0}, app:{1})', kernel_id, service)
@@ -611,7 +611,7 @@ async def server_main(
         log.debug("auto-detecting `container.bind-host` from container subnet config "
                   "and agent.rpc-listen-addr")
         local_config['container']['bind-host'] = await get_subnet_ip(
-            etcd, 'container', fallback_addr=local_config['agent']['rpc-listen-addr'].host
+            etcd, 'container', fallback_addr=local_config['agent']['rpc-listen-addr'].host,
         )
     log.info('Agent external IP: {}', local_config['agent']['rpc-listen-addr'].host)
     log.info('Container external IP: {}', local_config['container']['bind-host'])
@@ -630,7 +630,7 @@ async def server_main(
     monitor = aiomonitor.Monitor(
         loop,
         port=local_config['agent']['aiomonitor-port'],
-        console_enabled=False
+        console_enabled=False,
     )
     monitor.prompt = "monitor (agent) >>> "
     monitor.start()

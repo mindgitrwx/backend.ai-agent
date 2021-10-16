@@ -148,7 +148,7 @@ class KernelResourceSpec:
         allocations = cast(
             MutableMapping[
                 DeviceName,
-                MutableMapping[SlotName, Mapping[DeviceId, Decimal]]
+                MutableMapping[SlotName, Mapping[DeviceId, Decimal]],
             ],
             defaultdict(lambda: defaultdict(Decimal)),
         )
@@ -518,7 +518,7 @@ def distribute(num_items: int, groups: Sequence[T]) -> Mapping[T, int]:
     base, extra = divmod(num_items, len(groups))
     return dict(zip(
         groups,
-        ((base + (1 if i < extra else 0)) for i in range(len(groups)))
+        ((base + (1 if i < extra else 0)) for i in range(len(groups))),
     ))
 
 
@@ -569,7 +569,7 @@ class DiscretePropertyAllocMap(AbstractAllocMap):
             elif slot_type == SlotTypes.UNIQUE:
                 if alloc != Decimal(1):
                     raise InvalidResourceArgument(
-                        f"You may allocate only 1 for the unique-type slot {slot_name}"
+                        f"You may allocate only 1 for the unique-type slot {slot_name}",
                     )
 
         return self._allocate_impl[self.allocation_strategy](
@@ -643,7 +643,7 @@ class DiscretePropertyAllocMap(AbstractAllocMap):
                 if total_allocatable < remaining_alloc:
                     raise InsufficientResource(
                         "DiscretePropertyAllocMap: insufficient allocatable amount!",
-                        context_tag, slot_name, str(requested_alloc), str(total_allocatable)
+                        context_tag, slot_name, str(requested_alloc), str(total_allocatable),
                     )
 
                 # calculate the amount to spread out
@@ -732,7 +732,7 @@ class FractionAllocMap(AbstractAllocMap):
             for slot_name_b in requested_slots.keys():
                 if self.check_exclusive(slot_name_a, slot_name_b):
                     raise InvalidResourceCombination(
-                        f"Slots {slot_name_a} and {slot_name_b} cannot be allocated at the same time."
+                        f"Slots {slot_name_a} and {slot_name_b} cannot be allocated at the same time.",
                     )
 
         # check quantum size
@@ -740,7 +740,7 @@ class FractionAllocMap(AbstractAllocMap):
             if slot_value.remainder_near(self.quantum_size) != 0:
                 raise NotMultipleOfQuantum(
                     f"Requested amount {slot_value} for {slot_name} is "
-                    f"not a multiple of {self.quantum_size}."
+                    f"not a multiple of {self.quantum_size}.",
                 )
 
         return self._allocate_impl[self.allocation_strategy](
@@ -776,7 +776,7 @@ class FractionAllocMap(AbstractAllocMap):
             elif slot_type == SlotTypes.UNIQUE:
                 if alloc != Decimal(1):
                     raise InvalidResourceArgument(
-                        f"You may allocate only 1 for the unique-type slot {slot_name}"
+                        f"You may allocate only 1 for the unique-type slot {slot_name}",
                     )
             total_allocatable = Decimal(0)
             remaining_alloc = Decimal(alloc).normalize()
@@ -805,7 +805,7 @@ class FractionAllocMap(AbstractAllocMap):
             if any(value.remainder_near(self.quantum_size) != 0 for value in slot_allocation.values()):
                 alloc_repr = ", ".join(f"{k}={v}" for k, v in slot_allocation.items())
                 raise InsufficientResource(
-                    f"Device allocation ({alloc_repr}) is not a multiple of {self.quantum_size}"
+                    f"Device allocation ({alloc_repr}) is not a multiple of {self.quantum_size}",
                 )
             allocation[slot_name] = slot_allocation
         return allocation
@@ -975,7 +975,7 @@ class FractionAllocMap(AbstractAllocMap):
             if any(value.remainder_near(self.quantum_size) != 0 for value in slot_allocation.values()):
                 alloc_repr = ", ".join(f"{k}={v}" for k, v in slot_allocation.items())
                 raise InsufficientResource(
-                    f"Device allocation ({alloc_repr}) is not a multiple of {self.quantum_size}"
+                    f"Device allocation ({alloc_repr}) is not a multiple of {self.quantum_size}",
                 )
             for dev_id, value in slot_allocation.items():
                 self.allocations[slot_name][dev_id] += value

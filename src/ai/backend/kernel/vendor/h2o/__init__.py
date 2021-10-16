@@ -92,5 +92,7 @@ class Runner(BaseRunner):
             return ['echo', 'h2o daemon already started'], {}
         elif service_info['name'] == 'sftp':
             return [
-                self.runtime_path, '-m', 'sftpserver', '--port', str(service_info['port'])
+                self.runtime_path,
+                '-m', 'sftpserver',
+                '--port', str(service_info['port']),
             ], {}

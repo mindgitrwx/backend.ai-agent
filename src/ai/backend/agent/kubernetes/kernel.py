@@ -102,8 +102,8 @@ class KubernetesKernel(AbstractKernel):
                         'namespace': 'backend-ai',
                     },
                     'spec': {'replicas': num},
-                    'status': {'replicas': num, 'selector': f'run={self.deployment_name}'}
-                }
+                    'status': {'replicas': num, 'selector': f'run={self.deployment_name}'},
+                },
             )
         except Exception as e:
             log.exception('scale failed: {}', e)
@@ -122,7 +122,7 @@ class KubernetesKernel(AbstractKernel):
 
         pods = await core_api.list_namespaced_pod(
             'backend-ai',
-            label_selector=f'run=kernel-{self.kernel_id}'
+            label_selector=f'run=kernel-{self.kernel_id}',
         )
         pods = pods.to_dict()['items'] or []
         if len(pods) == 0:
@@ -219,7 +219,7 @@ class KubernetesKernel(AbstractKernel):
             core_api.connect_get_namespaced_pod_exec,
             self.kernel_id, 'backend-ai',
             command=['tar', 'cf', '-', abspath.resolve()], stderr=True, stdin=True, stdout=True,
-            tty=False, _preload_content=False
+            tty=False, _preload_content=False,
         ) as stream:
             async for event in stream:
                 log.debug('stream: {}', event)
@@ -268,7 +268,7 @@ class KubernetesKernel(AbstractKernel):
             core_api.connect_get_namespaced_pod_exec,
             self.kernel_id, 'backend-ai',
             command=command, stderr=True, stdin=True, stdout=True,
-            tty=False, _preload_content=False
+            tty=False, _preload_content=False,
         ) as stream:
             async for event in stream:
                 log.debug('stream: {}', event)
@@ -392,7 +392,7 @@ async def copy_runner_files(scratch_path: Path) -> None:
         '*.bin',
         '*.so',
         'DO_NOT_STORE_PERSISTENT_FILES_HERE.md',
-        'extract_dotfiles.py'
+        'extract_dotfiles.py',
     ]
 
     for target_glob in target_files:

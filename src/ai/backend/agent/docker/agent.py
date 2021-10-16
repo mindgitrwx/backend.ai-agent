@@ -166,8 +166,8 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
         port_pool: Set[int],
         agent_sockpath: Path,
         resource_lock: asyncio.Lock,
-        restarting: bool = False
-    ):
+        restarting: bool = False,
+    ) -> None:
         super().__init__(kernel_id, kernel_config, local_config, computers, restarting=restarting)
         scratch_dir = (self.local_config['container']['scratch-root'] / str(kernel_id)).resolve()
         tmp_dir = (self.local_config['container']['scratch-root'] / f'{kernel_id}_tmp').resolve()
@@ -394,14 +394,14 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
         target: Union[str, Path],
         perm: Literal['ro', 'rw'] = 'ro',
         is_unmanaged: bool = False,
-        opts: Mapping[str, Any] = None
+        opts: Mapping[str, Any] = None,
     ) -> Mount:
         return Mount(
-                type, Path(src), Path(target),
-                MountPermission(perm),
-                is_unmanaged=is_unmanaged,
-                opts=opts
-               )
+            type, Path(src), Path(target),
+            MountPermission(perm),
+            is_unmanaged=is_unmanaged,
+            opts=opts,
+        )
 
     async def apply_network(self, cluster_info: ClusterInfo) -> None:
         if cluster_info['network_name'] is not None:
@@ -477,7 +477,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
                     }
                     for mount in mounts
                 ],
-            }
+            },
         }
         self.container_configs.append(container_config)
 
@@ -495,7 +495,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
         environ: Mapping[str, str],
         service_ports,
         preopen_ports,
-        cmdargs: List[str]
+        cmdargs: List[str],
     ) -> DockerKernel:
         loop = current_loop()
         image_labels = self.kernel_config['image']['labels']
@@ -641,7 +641,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
             'Labels': {
                 'ai.backend.kernel-id': str(self.kernel_id),
                 'ai.backend.internal.block-service-ports':
-                    '1' if self.internal_data.get('block_service_ports', False) else '0'
+                    '1' if self.internal_data.get('block_service_ports', False) else '0',
             },
             'HostConfig': {
                 'Init': True,
@@ -677,7 +677,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
             update_nested_dict(container_config, {
                 'HostConfig': {
                     'SecurityOpt': ['seccomp=unconfined', 'apparmor=unconfined'],
-                }
+                },
             })
 
         if resource_opts and resource_opts.get('shmem'):
@@ -721,7 +721,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
                     await loop.run_in_executor(None, resource_spec.write_to_file, f)
                 async with AsyncFileWriter(
                     target_filename=self.config_dir / 'resource.txt',
-                    access_mode='a'
+                    access_mode='a',
                 ) as writer:
                     for dev_name, device_alloc in resource_spec.allocations.items():
                         computer_ctx = self.computers[dev_name]
@@ -784,7 +784,7 @@ class DockerKernelCreationContext(AbstractKernelCreationContext[DockerKernel]):
                 'stdout_port': stdout_port,  # legacy
                 'host_ports': host_ports,
                 'domain_socket_proxies': self.domain_socket_proxies,
-                'block_service_ports': self.internal_data.get('block_service_ports', False)
+                'block_service_ports': self.internal_data.get('block_service_ports', False),
             })
         return kernel_obj
 
@@ -882,7 +882,7 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
 
     async def detect_resources(self) -> Tuple[
         Mapping[DeviceName, AbstractComputePlugin],
-        Mapping[SlotName, Decimal]
+        Mapping[SlotName, Decimal],
     ]:
         return await detect_resources(self.etcd, self.local_config)
 
@@ -907,7 +907,7 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                                 (
                                     kernel_id,
                                     container_from_docker_container(container),
-                                )
+                                ),
                             )
                     except asyncio.CancelledError:
                         pass
@@ -936,14 +936,14 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                         if docker_info['Swarm']['LocalNodeState'] == 'inactive':
                             raise InitializationError(
                                 "The swarm mode is enabled but the node state of "
-                                "the local Docker daemon is inactive."
+                                "the local Docker daemon is inactive.",
                             )
                 except InitializationError as e:
                     log.exception(str(e))
                     swarm_enabled = False
                 finally:
                     self.heartbeat_extra_info = {
-                        'swarm_enabled': swarm_enabled
+                        'swarm_enabled': swarm_enabled,
                     }
                     if not as_task:
                         return
@@ -1098,7 +1098,7 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
             self.port_pool,
             self.agent_sockpath,
             self.resource_lock,
-            restarting=restarting
+            restarting=restarting,
         )
 
     async def restart_kernel__load_config(
@@ -1239,8 +1239,8 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                 'Driver': 'overlay',
                 'Attachable': True,
                 'Labels': {
-                    'ai.backend.cluster-network': '1'
-                }
+                    'ai.backend.cluster-network': '1',
+                },
             })
 
     async def destroy_overlay_network(self, network_name: str) -> None:
@@ -1257,8 +1257,8 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                 'Name': network_name,
                 'Driver': 'bridge',
                 'Labels': {
-                    'ai.backend.cluster-network': '1'
-                }
+                    'ai.backend.cluster-network': '1',
+                },
             })
 
     async def destroy_local_network(self, network_name: str) -> None:
@@ -1306,7 +1306,7 @@ class DockerAgent(AbstractAgent[DockerKernel, DockerKernelCreationContext]):
                                 # Break out to the outermost loop when the connection is closed
                                 log.info(
                                     "monitor_docker_events(): "
-                                    "restarting aiodocker event subscriber"
+                                    "restarting aiodocker event subscriber",
                                 )
                                 break
                             if evdata['Type'] != 'container':

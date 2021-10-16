@@ -135,6 +135,8 @@ class Runner(BaseRunner):
             ], {}, '/home/work/spectravis'
         elif service_info['name'] == 'sftp':
             return [
-                self.runtime_path, '-m', 'sftpserver', '--port', str(service_info['port'])
+                self.runtime_path,
+                '-m', 'sftpserver',
+                '--port', str(service_info['port']),
             ], {}
         return None, None

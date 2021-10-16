@@ -433,12 +433,12 @@ class BaseRunner(metaclass=ABCMeta):
                         json.dumps({
                             'type': dtype,
                             'data': f'data:{dtype};base64,{dval}',
-                        }).encode('utf-8')
+                        }).encode('utf-8'),
                     ])
                 elif dtype == 'image/svg+xml':
                     await self.outsock.send_multipart([
                         b'media',
-                        json.dumps({'type': dtype, 'data': dval}).encode('utf8')
+                        json.dumps({'type': dtype, 'data': dval}).encode('utf8'),
                     ])
 
         async def stdin_hook(msg):
@@ -648,7 +648,7 @@ class BaseRunner(metaclass=ABCMeta):
             kernel_id_hex = uuid.UUID(kernel_id).hex
             log_path = Path(
                 '/home/work/.logs/task/'
-                f'{kernel_id_hex[:2]}/{kernel_id_hex[2:4]}/{kernel_id_hex[4:]}.log'
+                f'{kernel_id_hex[:2]}/{kernel_id_hex[2:4]}/{kernel_id_hex[4:]}.log',
             )
             log_path.parent.mkdir(parents=True, exist_ok=True)
         else:

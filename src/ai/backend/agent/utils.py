@@ -253,7 +253,7 @@ async def host_pid_to_container_pid(container_id: str, host_pid: HostPID) -> Con
                         'AttachStdout': True,
                         'AttachStderr': True,
                         'Cmd': ['ps', '-aux'],
-                    }
+                    },
                 )
                 exec_id = result['Id']
                 async with docker._query(
@@ -273,7 +273,7 @@ async def host_pid_to_container_pid(container_id: str, host_pid: HostPID) -> Con
                 procs = result[1:]
                 pid_idx, cmd_idx = head.index('PID'), head.index('COMMAND')
                 container_table = list(
-                    filter(lambda x: cmd == ' '.join(x[cmd_idx:]) if x else False, procs)
+                    filter(lambda x: cmd == ' '.join(x[cmd_idx:]) if x else False, procs),
                 )
 
                 # When there are multiple processes which have the same COMMAND, just get the index of

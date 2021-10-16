@@ -80,7 +80,7 @@ agent_local_config_iv = t.Dict({
 docker_extra_config_iv = t.Dict({
     t.Key('container'): t.Dict({
         t.Key('swarm-enabled', default=False): t.Bool,
-    }).allow_extra('*')
+    }).allow_extra('*'),
 }).allow_extra('*')
 
 default_container_logs_config = {
@@ -92,10 +92,10 @@ agent_etcd_config_iv = t.Dict({
     t.Key('container-logs', default=default_container_logs_config): t.Dict({
         t.Key('max-length', default=default_container_logs_config['max-length']): tx.BinarySize(),
         t.Key('chunk-size', default=default_container_logs_config['chunk-size']): tx.BinarySize(),
-    }).allow_extra('*')
+    }).allow_extra('*'),
 }).allow_extra('*')
 
 container_etcd_config_iv = t.Dict({
     t.Key('kernel-uid', optional=True): t.ToInt,
-    t.Key('kernel-gid', optional=True): t.ToInt
+    t.Key('kernel-gid', optional=True): t.ToInt,
 }).allow_extra('*')

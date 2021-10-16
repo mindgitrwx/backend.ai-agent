@@ -416,7 +416,7 @@ class StatContext:
             kernel_id = None
             for computer in self.agent.computers.values():
                 _tasks.append(asyncio.create_task(
-                    computer.instance.gather_container_measures(self, container_ids)
+                    computer.instance.gather_container_measures(self, container_ids),
                 ))
             results = await asyncio.gather(*_tasks, return_exceptions=True)
             for result in results:

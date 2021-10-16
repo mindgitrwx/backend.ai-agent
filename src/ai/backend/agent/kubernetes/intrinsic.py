@@ -94,7 +94,7 @@ class CPUPlugin(AbstractComputePlugin):
 
     key = DeviceName('cpu')
     slot_types = [
-        (SlotName('cpu'), SlotTypes.COUNT)
+        (SlotName('cpu'), SlotTypes.COUNT),
     ]
 
     async def init(self, context: Any = None) -> None:
@@ -120,7 +120,7 @@ class CPUPlugin(AbstractComputePlugin):
                 hw_location='root',
                 numa_node=None,
                 memory_size=0,
-                processing_units=int(node['status']['capacity']['cpu']) * overcommit_factor
+                processing_units=int(node['status']['capacity']['cpu']) * overcommit_factor,
             )
             for i, node in zip(range(len(nodes)), nodes)
             # if 'node-role.kubernetes.io/master' not in node['metadata']['labels'].keys()
@@ -231,7 +231,7 @@ class MemoryPlugin(AbstractComputePlugin):
 
     key = DeviceName('mem')
     slot_types = [
-        (SlotName('mem'), SlotTypes.BYTES)
+        (SlotName('mem'), SlotTypes.BYTES),
     ]
 
     async def init(self, context: Any = None) -> None:
@@ -261,8 +261,8 @@ class MemoryPlugin(AbstractComputePlugin):
                 hw_location='root',
                 numa_node=0,
                 memory_size=mem * overcommit_factor,
-                processing_units=0
-            )
+                processing_units=0,
+            ),
         ]
 
     async def available_slots(self) -> Mapping[SlotName, Decimal]:

@@ -66,9 +66,9 @@ class ConfigMap(AbstractAPIObject):
             'kind': 'ConfigMap',
             'metadata': {
                 'name': self.name,
-                'labels': self.labels
+                'labels': self.labels,
             },
-            'data': self.items
+            'data': self.items,
         }
 
 
@@ -86,13 +86,13 @@ class Service(AbstractAPIObject):
             'kind': 'Service',
             'metadata': {
                 'name': self.name,
-                'labels': self.labels
+                'labels': self.labels,
             },
             'spec': {
                 'ports': [{'targetPort': x[0], 'port': x[0], 'name': x[1]} for x in self.container_port],
                 'selector': {'run': self.deployment_name},
-                'type': ''
-            }
+                'type': '',
+            },
         }
         if self.service_type == 'NodePort':
             base['spec']['type'] = 'NodePort'
@@ -120,19 +120,19 @@ class NFSPersistentVolume(AbstractAPIObject):
             'kind': 'PersistentVolume',
             'metadata': {
                 'name': self.name,
-                'labels': self.labels
+                'labels': self.labels,
             },
             'spec': {
                 'capacity': {
-                    'storage': self.capacity + 'Gi'
+                    'storage': self.capacity + 'Gi',
                 },
                 'accessModes': ['ReadWriteMany'],
                 'nfs': {
                     'server': self.server,
-                    'path': self.path
+                    'path': self.path,
                 },
-                'mountOptions': self.options
-            }
+                'mountOptions': self.options,
+            },
         }
 
 
@@ -154,18 +154,18 @@ class HostPathPersistentVolume(AbstractAPIObject):
             'kind': 'PersistentVolume',
             'metadata': {
                 'name': self.name,
-                'labels': self.labels
+                'labels': self.labels,
             },
             'spec': {
                 'capacity': {
-                    'storage': self.capacity + 'Gi'
+                    'storage': self.capacity + 'Gi',
                 },
                 'accessModes': ['ReadWriteMany'],
                 'hostPath': {
-                    'path': self.path
+                    'path': self.path,
                 },
-                'mountOptions': self.options
-            }
+                'mountOptions': self.options,
+            },
         }
 
 
@@ -186,16 +186,16 @@ class PersistentVolumeClaim(AbstractAPIObject):
             'kind': 'PersistentVolumeClaim',
             'metadata': {
                 'name': self.name,
-                'labels': self.labels
+                'labels': self.labels,
             },
             'spec': {
                 'resources': {
                     'requests': {
-                        'storage': self.capacity + 'Gi'
-                    }
+                        'storage': self.capacity + 'Gi',
+                    },
                 },
                 'accessModes': ['ReadWriteMany'],
-                'storageClassName': ''
-            }
+                'storageClassName': '',
+            },
         }
         return base

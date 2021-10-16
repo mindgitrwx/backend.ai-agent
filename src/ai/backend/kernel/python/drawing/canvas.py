@@ -115,7 +115,7 @@ class Canvas:
     def update(self):
         builtins._sorna_emit(MediaRecord(
             u'application/x-sorna-drawing',
-            encode_commands(self._cmd_history)
+            encode_commands(self._cmd_history),
         ))
         self._cmd_history = []
 
@@ -127,22 +127,22 @@ class Canvas:
         return t
 
     def stop_animation(self):
-        self._cmd_history.append((self._id, u'stop-anim',))
+        self._cmd_history.append((self._id, u'stop-anim'))
 
     def resume_animation(self):
-        self._cmd_history.append((self._id, u'resume-anim',))
+        self._cmd_history.append((self._id, u'resume-anim'))
 
     def begin_group(self):
-        self._cmd_history.append((self._id, u'begin-group',))
+        self._cmd_history.append((self._id, u'begin-group'))
 
     def end_group(self):
-        self._cmd_history.append((self._id, u'end-group',))
+        self._cmd_history.append((self._id, u'end-group'))
 
     def begin_fill(self, c):
         self._cmd_history.append((self._id, u'begin-fill', c.to_hex()))
 
     def end_fill(self):
-        self._cmd_history.append((self._id, u'end-fill',))
+        self._cmd_history.append((self._id, u'end-fill'))
 
     def background_color(self, c):
         self.bgcolor = c
@@ -157,7 +157,7 @@ class Canvas:
             color = self.fgcolor
         args = (
             u'line', x0, y0, x1, y1,
-            color.to_hex()
+            color.to_hex(),
         )
         self._cmd_history.append((self._id, u'obj', self._next_objid, args))
         obj = DrawingObject(self, self._next_objid, args)
@@ -171,7 +171,7 @@ class Canvas:
             fill = Colors.Transparent
         args = (
             u'circle', x, y, radius,
-            border.to_hex(), fill.to_hex(), angle
+            border.to_hex(), fill.to_hex(), angle,
         )
         self._cmd_history.append((self._id, u'obj', self._next_objid, args))
         obj = DrawingObject(self, self._next_objid, args)
@@ -185,7 +185,7 @@ class Canvas:
             fill = Colors.Transparent
         args = (
             u'rect', left, top, width, height,
-            border.to_hex(), fill.to_hex(), angle
+            border.to_hex(), fill.to_hex(), angle,
         )
         self._cmd_history.append((self._id, u'obj', self._next_objid, args))
         obj = DrawingObject(self, self._next_objid, args)
@@ -199,7 +199,7 @@ class Canvas:
             fill = Colors.Transparent
         args = (
             u'triangle', left, top, width, height,
-            border.to_hex(), fill.to_hex(), angle
+            border.to_hex(), fill.to_hex(), angle,
         )
         self._cmd_history.append((self._id, u'obj', self._next_objid, args))
         obj = DrawingObject(self, self._next_objid, args)

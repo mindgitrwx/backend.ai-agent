@@ -314,7 +314,7 @@ def test_fraction_alloc_map_iteration():
             DeviceId('a1'): DeviceSlotInfo(SlotTypes.COUNT, SlotName('x'), Decimal(1.0)),
         },
         allocation_strategy=AllocationStrategy.FILL,
-        quantum_size=Decimal("0.00001")
+        quantum_size=Decimal("0.00001"),
     )
     assert alloc_map.allocations[SlotName('x')][DeviceId('a0')] == Decimal('0')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0')
@@ -401,7 +401,7 @@ def test_fraction_alloc_map_even_allocation():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('0.2')
+        SlotName('x'): Decimal('0.2'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a2')] == Decimal('0.2')
 
@@ -409,7 +409,7 @@ def test_fraction_alloc_map_even_allocation():
     assert alloc_map.allocations[SlotName('x')][DeviceId('a2')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('0.2')
+        SlotName('x'): Decimal('0.2'),
     }, min_memory=Decimal('0.25'))
     assert alloc_map.allocations[SlotName('x')][DeviceId('a3')] == Decimal('0.2')
     alloc_map.free(result)
@@ -417,7 +417,7 @@ def test_fraction_alloc_map_even_allocation():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('0.5')
+        SlotName('x'): Decimal('0.5'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a2')] == Decimal('0.2')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a3')] == Decimal('0.3')
@@ -426,7 +426,7 @@ def test_fraction_alloc_map_even_allocation():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('0.65')
+        SlotName('x'): Decimal('0.65'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a0')] == Decimal('0.05')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0.1')
@@ -437,7 +437,7 @@ def test_fraction_alloc_map_even_allocation():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('0.6')
+        SlotName('x'): Decimal('0.6'),
     }, min_memory=Decimal('0.1'))
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0.1')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a2')] == Decimal('0.2')
@@ -454,7 +454,7 @@ def test_fraction_alloc_map_even_allocation():
         },
     )
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('1')
+        SlotName('x'): Decimal('1'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a0')] == Decimal('0.3')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0.3')
@@ -473,7 +473,7 @@ def test_fraction_alloc_map_even_allocation_fractions():
         allocation_strategy=AllocationStrategy.EVENLY,
     )
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('2.31')
+        SlotName('x'): Decimal('2.31'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a0')] == Decimal('0.67')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0.67')
@@ -484,7 +484,7 @@ def test_fraction_alloc_map_even_allocation_fractions():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('2')
+        SlotName('x'): Decimal('2'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a0')] == Decimal('0.67')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('0.67')
@@ -505,7 +505,7 @@ def test_fraction_alloc_map_even_allocation_many_devices():
         allocation_strategy=AllocationStrategy.EVENLY,
     )
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('6')
+        SlotName('x'): Decimal('6'),
     })
     assert alloc_map.allocations[SlotName('x')][DeviceId('a1')] == Decimal('3')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a2')] == Decimal('3')
@@ -529,7 +529,7 @@ def test_fraction_alloc_map_even_allocation_many_devices():
     )
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('6')
+        SlotName('x'): Decimal('6'),
     }, min_memory=Decimal('2.5'))
     assert alloc_map.allocations[SlotName('x')][DeviceId('a3')] == Decimal('3')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a4')] == Decimal('3')
@@ -538,7 +538,7 @@ def test_fraction_alloc_map_even_allocation_many_devices():
         assert alloc_map.allocations[SlotName('x')][DeviceId(f'a{idx}')] == Decimal('0')
 
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('11')
+        SlotName('x'): Decimal('11'),
     }, min_memory=Decimal('0.84'))
     assert alloc_map.allocations[SlotName('x')][DeviceId('a3')] == Decimal('2.75')
     assert alloc_map.allocations[SlotName('x')][DeviceId('a4')] == Decimal('2.75')
@@ -564,7 +564,7 @@ def test_fraction_alloc_map_even_allocation_many_devices_2():
         allocation_strategy=AllocationStrategy.EVENLY,
     )
     result = alloc_map.allocate({
-        SlotName('x'): Decimal('6')
+        SlotName('x'): Decimal('6'),
     })
     count_0 = 0
     count_1 = 0
@@ -712,7 +712,7 @@ def test_heterogeneous_resource_slots_with_discrete_alloc_map():
 
     # check allocation of non-unique slots
     result = alloc_map.allocate({
-        SlotName('cuda.device'): Decimal('2')
+        SlotName('cuda.device'): Decimal('2'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('0')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('0')
@@ -724,41 +724,41 @@ def test_heterogeneous_resource_slots_with_discrete_alloc_map():
 
     with pytest.raises(InsufficientResource):
         alloc_map.allocate({
-            SlotName('cuda.device'): Decimal('3')
+            SlotName('cuda.device'): Decimal('3'),
         })
     check_clean()
 
     # allocating zero means no-op.
     alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('0')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('0'),
     })
     check_clean()
 
     # any allocation request for unique slots should specify the amount 1.
     with pytest.raises(InvalidResourceArgument):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('1.1')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('1.1'),
         })
     with pytest.raises(InvalidResourceArgument):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('2')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('2'),
         })
     check_clean()
 
     # test alloaction of unique slots
     result1 = alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('1')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('0')
     result2 = alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('1')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('1')
     with pytest.raises(InsufficientResource):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
         })
     alloc_map.free(result1)
     alloc_map.free(result2)
@@ -789,7 +789,7 @@ def test_heterogeneous_resource_slots_with_fractional_alloc_map():
 
     # check allocation of non-unique slots
     result = alloc_map.allocate({
-        SlotName('cuda.shares'): Decimal('2.0')
+        SlotName('cuda.shares'): Decimal('2.0'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('0')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('0')
@@ -801,41 +801,41 @@ def test_heterogeneous_resource_slots_with_fractional_alloc_map():
 
     with pytest.raises(InsufficientResource):
         alloc_map.allocate({
-            SlotName('cuda.shares'): Decimal('2.5')
+            SlotName('cuda.shares'): Decimal('2.5'),
         })
     check_clean()
 
     # allocating zero means no-op.
     alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('0')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('0'),
     })
     check_clean()
 
     # any allocation request for unique slots should specify the amount 1.
     with pytest.raises(InvalidResourceArgument):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('0.3')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('0.3'),
         })
     with pytest.raises(InvalidResourceArgument):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('1.5')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('1.5'),
         })
     check_clean()
 
     # test alloaction of unique slots
     result1 = alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('1')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('0')
     result2 = alloc_map.allocate({
-        SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+        SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
     })
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a0')] == Decimal('1')
     assert alloc_map.allocations[SlotName('cuda.device:1g.5gb-mig')][DeviceId('a1')] == Decimal('1')
     with pytest.raises(InsufficientResource):
         alloc_map.allocate({
-            SlotName('cuda.device:1g.5gb-mig'): Decimal('1')
+            SlotName('cuda.device:1g.5gb-mig'): Decimal('1'),
         })
     alloc_map.free(result1)
     alloc_map.free(result2)

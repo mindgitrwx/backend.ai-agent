@@ -14,7 +14,7 @@ import shutil
 import signal
 from typing import (
     Any, FrozenSet, List, Literal, Mapping,
-    MutableMapping, Optional, Sequence, Tuple, Union, cast
+    MutableMapping, Optional, Sequence, Tuple, Union, cast,
 )
 from ai.backend.common.logging_utils import BraceStyleAdapter
 
@@ -30,7 +30,7 @@ from .kube_object import (
     ConfigMap, HostPathPersistentVolume, KubernetesAbstractVolume,
     KubernetesConfigMapVolume, KubernetesHostPathVolume,
     KubernetesPVCVolume, KubernetesVolumeMount, NFSPersistentVolume,
-    PersistentVolumeClaim, Service
+    PersistentVolumeClaim, Service,
 )
 
 from ..agent import ACTIVE_STATUS_SET, AbstractAgent, AbstractKernelCreationContext, ComputerContext
@@ -41,7 +41,7 @@ from ..resources import (
     AbstractComputePlugin,
     KernelResourceSpec,
     Mount,
-    known_slot_types
+    known_slot_types,
 )
 from ..types import Container, ContainerStatus, Port
 
@@ -90,8 +90,8 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
         computers: MutableMapping[str, ComputerContext],
         workers: Mapping[str, Mapping[str, str]],
         static_pvc_name: str,
-        restarting: bool = False
-    ):
+        restarting: bool = False,
+    ) -> None:
         super().__init__(kernel_id, kernel_config, local_config, computers, restarting=restarting)
         scratch_dir = (self.local_config['container']['scratch-root'] / str(kernel_id)).resolve()
 
@@ -106,9 +106,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
             KubernetesPVCVolume(
                 name=f'kernel-{self.kernel_id}-scratches',
                 persistentVolumeClaim={
-                    'claimName': self.static_pvc_name
-                }
-            )
+                    'claimName': self.static_pvc_name,
+                },
+            ),
         ]
 
         self.config_maps = []
@@ -159,7 +159,7 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
         # Unlike Docker, static files will be mounted directly to blank folder
         # Check if NFS PVC for static files exists and bound
         nfs_pvc = await core_api.list_persistent_volume_claim_for_all_namespaces(
-            label_selector='backend.ai/backend-ai-scratch-volume'
+            label_selector='backend.ai/backend-ai-scratch-volume',
         )
         if len(nfs_pvc.items) == 0:
             raise K8sError('No PVC for backend.ai static files')
@@ -220,9 +220,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 Path('/home/work'),
                 MountPermission.READ_WRITE,
                 opts={
-                    'name': f'kernel-{self.kernel_id}-scratches'
-                }
-            )
+                    'name': f'kernel-{self.kernel_id}-scratches',
+                },
+            ),
         ]
 
         # TODO: Find way to mount extra volumes
@@ -259,9 +259,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
             KubernetesConfigMapVolume(
                 name=f'kernel-{self.kernel_id}-ssh-keypair',
                 configMap={
-                    'name': 'ssh-keypair-hash'
-                }
-            )
+                    'name': 'ssh-keypair-hash',
+                },
+            ),
         ])
         self.process_mounts([
             Mount(
@@ -270,8 +270,8 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 Path('/home/config/ssh/id_cluster.pub'),
                 permission=MountPermission.READ_ONLY,
                 opts={
-                    'name': f'kernel-{self.kernel_id}-ssh-keypair'
-                }
+                    'name': f'kernel-{self.kernel_id}-ssh-keypair',
+                },
             ),
             Mount(
                 MountTypes.K8S_GENERIC,
@@ -279,9 +279,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 Path('/home/config/ssh/id_cluster.pub'),
                 permission=MountPermission.READ_ONLY,
                 opts={
-                    'name': f'kernel-{self.kernel_id}-ssh-keypair'
-                }
-            )
+                    'name': f'kernel-{self.kernel_id}-ssh-keypair',
+                },
+            ),
         ])
 
     async def process_mounts(self, mounts: Sequence[Mount]):
@@ -293,8 +293,8 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                         name=name,
                         mountPath=mount.target.as_posix(),
                         subPath=mount.source.as_posix() if mount.source is not None else None,
-                        readOnly=mount.permission == MountPermission.READ_ONLY
-                    )
+                        readOnly=mount.permission == MountPermission.READ_ONLY,
+                    ),
                 )
             elif mount.type == MountTypes.K8S_HOSTPATH:
                 name = (mount.opts or {})['name']
@@ -303,15 +303,15 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                         name=name,
                         mountPath=mount.target.as_posix(),
                         subPath=None,
-                        readOnly=mount.permission == MountPermission.READ_ONLY
-                    )
+                        readOnly=mount.permission == MountPermission.READ_ONLY,
+                    ),
                 )
             else:
                 log.warn(
                     'Mount {}:{} -> Mount type {} it not supported on K8s Agent. Skipping mount',
                     mount.source,
                     mount.target,
-                    mount.type
+                    mount.type,
                 )
 
     def resolve_krunner_filepath(self, filename: str) -> Path:
@@ -324,27 +324,27 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
         target: Union[str, Path],
         perm: Literal['ro', 'rw'] = 'ro',
         is_unmanaged: bool = False,
-        opts: Mapping[str, Any] = None
-    ):
+        opts: Mapping[str, Any] = None,
+    ) -> Mount:
         return Mount(
                 MountTypes.K8S_GENERIC, Path(src), Path(target),
                 MountPermission(perm),
                 opts={
                         **(opts or {}),
-                        'name': f'kernel-{self.kernel_id}-scratches'
-                     }
+                        'name': f'kernel-{self.kernel_id}-scratches',
+                     },
                )
 
     async def process_volumes(
         self,
-        volumes: List[KubernetesAbstractVolume]
+        volumes: List[KubernetesAbstractVolume],
     ) -> None:
         self.volumes += volumes
 
     async def mount_vfolders(
         self,
         vfolders,
-        resource_spec: KernelResourceSpec
+        resource_spec: KernelResourceSpec,
     ) -> None:
         vfolder_mount_map: Mapping[str, str]
         vfolder_mount_map = self.kernel_config.get('mount_map', {})
@@ -400,17 +400,17 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 kernel_path,
                 folder_perm,
                 opts={
-                    'name': f'kernel-{self.kernel_id}-hostPath-{i}'
-                }
+                    'name': f'kernel-{self.kernel_id}-hostPath-{i}',
+                },
             )
             self.process_volumes([
                 KubernetesHostPathVolume(
                     name=f'kernel-{self.kernel_id}-hostPath-{i}',
                     hostPath={
                         'path': host_path.as_posix(),
-                        'type': 'Directory'
-                    }
-                )
+                        'type': 'Directory',
+                    },
+                ),
             ])
 
             resource_spec.mounts.append(mount)
@@ -425,14 +425,14 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
     async def generate_deployment_object(
         self, image: str, environ: Mapping[str, Any],
         ports: List[int], command: List[str],
-        labels: Mapping[str, Any] = {}
+        labels: Mapping[str, Any] = {},
     ) -> dict:
         return {
             'apiVersion': 'apps/v1',
             'kind': 'Deployment',
             'metadata': {
                 'name': f'kernel-{self.kernel_id}',
-                'labels': labels
+                'labels': labels,
             },
             'spec': {
                 'replicas': 0,
@@ -451,9 +451,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                             'ports': [{'containerPort': x} for x in ports],
                         }],
                         'volumes': [cattr.unstructure(v) for v in self.volumes],
-                    }
-                }
-            }
+                    },
+                },
+            },
         }
 
     async def spawn(
@@ -501,7 +501,7 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 # for env in accel_envs:
                 #     buf.write(f'{env}\n')
                 await loop.run_in_executor(
-                    None, functools.partial(_write_config, 'environ.txt', buf.getvalue())
+                    None, functools.partial(_write_config, 'environ.txt', buf.getvalue()),
                 )
 
             with StringIO() as buf:
@@ -513,13 +513,13 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                     for k, v in kvpairs.items():
                         buf.write(f'{k}={v}\n')
                 await loop.run_in_executor(
-                    None, functools.partial(_write_config, 'resource.txt', buf.getvalue())
+                    None, functools.partial(_write_config, 'resource.txt', buf.getvalue()),
                 )
 
             docker_creds = self.internal_data.get('docker_credentials')
             if docker_creds:
                 await loop.run_in_executor(
-                    None, functools.partial(_write_config, 'docker-creds.json', docker_creds)
+                    None, functools.partial(_write_config, 'docker-creds.json', docker_creds),
                 )
 
         if keypair := self.internal_data.get('ssh_keypair'):
@@ -537,9 +537,9 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                     KubernetesConfigMapVolume(
                         name='ssh-config',
                         configMap={
-                            'name': f'kernel-{self.kernel_id}-ssh-config'
-                        }
-                    )
+                            'name': f'kernel-{self.kernel_id}-ssh-config',
+                        },
+                    ),
                 ])
                 self.process_mounts([
                     Mount(
@@ -547,17 +547,17 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                         Path('authorized_keys'),
                         Path('/home/work/.ssh/authorized_keys'),
                         opts={
-                            'name': 'ssh-config'
-                        }
+                            'name': 'ssh-config',
+                        },
                     ),
                     Mount(
                         MountTypes.K8S_GENERIC,
                         Path('id_container'),
                         Path('/home/work/.ssh/id_container'),
                         opts={
-                            'name': 'ssh-config'
-                        }
-                    )
+                            'name': 'ssh-config',
+                        },
+                    ),
                 ])
 
         # higher priority dotfiles are stored last to support overwriting
@@ -592,8 +592,8 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
             exposed_ports,
             cmdargs,
             labels={
-                'ai.backend.service-ports': service_port_label.replace(':', '-').replace(',', '.')
-            }
+                'ai.backend.service-ports': service_port_label.replace(':', '-').replace(',', '.'),
+            },
         )
 
         if self.local_config['debug']['log-kernel-config']:
@@ -603,14 +603,14 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
             str(self.kernel_id),
             f'kernel-{self.kernel_id}-expose',
             [
-                (port, f'kernel-{self.kernel_id}-svc-{index}',)
+                (port, f'kernel-{self.kernel_id}-svc-{index}')
                 for index, port in zip(range(len(exposed_ports)), exposed_ports)
-            ]
+            ],
         )
 
         async def rollup(
             functions: List[Tuple[Optional[functools.partial],
-            Optional[functools.partial]]]
+            Optional[functools.partial]]],
         ):
             rollback_functions: List[Optional[functools.partial]] = []
 
@@ -645,7 +645,7 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
             arguments.append((
                 functools.partial(
                     core_api.create_namespaced_config_map, 'backend-ai',
-                    body=cm.to_dict()
+                    body=cm.to_dict(),
                 ),
                 functools.partial(core_api.delete_namespaced_config_map, cm.name, 'backend-ai'),
             ))
@@ -653,7 +653,7 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
         arguments.append((
             functools.partial(
                 apps_api.create_namespaced_deployment, 'backend-ai',
-                body=deployment, pretty='pretty-example'
+                body=deployment, pretty='pretty-example',
             ),
             None,
         ))
@@ -703,7 +703,7 @@ class KubernetesKernelCreationContext(AbstractKernelCreationContext[KubernetesKe
                 'stdout_port': stdout_port,  # legacy
                 'assigned_ports': assigned_ports,
                 # 'domain_socket_proxies': self.domain_socket_proxies,
-                'block_service_ports': self.internal_data.get('block_service_ports', False)
+                'block_service_ports': self.internal_data.get('block_service_ports', False),
             })
         return kernel_obj
 
@@ -752,7 +752,7 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
                 'kind': 'Namespace',
                 'metadata': {
                     'name': 'backend-ai',
-                }
+                },
             })
 
         pv = await core_api.list_persistent_volume(label_selector='backend.ai/backend-ai-scratch-volume')
@@ -762,11 +762,11 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
             if self.local_config['container']['scratch-type'] == 'k8s-nfs':
                 new_pv = NFSPersistentVolume(
                     self.local_config['container']['scratch-nfs-address'],
-                    'backend-ai-static-pv', capacity
+                    'backend-ai-static-pv', capacity,
                 )
                 new_pv.label(
                     'backend.ai/backend-ai-scratch-volume',
-                    self.local_config['container']['scratch-nfs-address']
+                    self.local_config['container']['scratch-nfs-address'],
                 )
                 new_pv.options = [
                     x.strip()
@@ -775,12 +775,12 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
             elif self.local_config['container']['scratch-type'] == 'hostdir':
                 new_pv = HostPathPersistentVolume(
                     self.local_config['container']['scratch-root'].as_posix(),
-                    'backend-ai-static-pv', capacity
+                    'backend-ai-static-pv', capacity,
                 )
                 new_pv.label('backend.ai/backend-ai-scratch-volume', 'hostPath')
             else:
                 raise NotImplementedError(
-                    f'Scratch type {self.local_config["container"]["scratch-type"]} is not supported'
+                    f'Scratch type {self.local_config["container"]["scratch-type"]} is not supported',
                 )
 
             try:
@@ -789,24 +789,24 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
                 raise
 
         pvc = await core_api.list_persistent_volume_claim_for_all_namespaces(
-            label_selector='backend.ai/backend-ai-scratch-volume'
+            label_selector='backend.ai/backend-ai-scratch-volume',
         )
 
         if len(pvc.items) == 0:
             # PV does not exists; create one
             new_pvc = PersistentVolumeClaim(
-                'backend-ai-static-pvc', 'backend-ai-static-pv', capacity
+                'backend-ai-static-pvc', 'backend-ai-static-pv', capacity,
             )
             if self.local_config['container']['scratch-type'] == 'k8s-nfs':
                 new_pvc.label(
                     'backend.ai/backend-ai-scratch-volume',
-                    self.local_config['container']['scratch-nfs-address']
+                    self.local_config['container']['scratch-nfs-address'],
                 )
             else:
                 new_pvc.label('backend.ai/backend-ai-scratch-volume', 'hostPath')
             try:
                 await core_api.create_namespaced_persistent_volume_claim(
-                    'backend-ai', body=new_pvc.to_dict()
+                    'backend-ai', body=new_pvc.to_dict(),
                 )
             except Exception as e:
                 log.exception('Error: {}', e)
@@ -837,7 +837,7 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
 
     async def detect_resources(self) -> Tuple[
         Mapping[DeviceName, AbstractComputePlugin],
-        Mapping[SlotName, Decimal]
+        Mapping[SlotName, Decimal],
     ]:
         return await detect_resources(self.etcd, self.local_config)
 
@@ -865,7 +865,7 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
                             (
                                 KernelId(uuid.UUID(kernel_id)),
                                 await container_from_pod(pod),
-                            )
+                            ),
                         )
                 except asyncio.CancelledError:
                     pass
@@ -911,7 +911,7 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
             self.computers,
             self.workers,
             'backend-ai-static-pvc',
-            restarting=restarting
+            restarting=restarting,
         )
 
     async def destroy_kernel(self, kernel_id: KernelId, container_id: Optional[ContainerId]) -> None:
@@ -943,7 +943,7 @@ class KubernetesAgent(AbstractAgent[KubernetesKernel, KubernetesKernelCreationCo
         self,
         kernel_id: KernelId,
         container_id: Optional[ContainerId],
-        restarting: bool
+        restarting: bool,
     ) -> None:
         loop = current_loop()
         if not restarting:
@@ -1013,7 +1013,7 @@ async def container_from_pod(pod: Any) -> Container:
         image=pod['spec']['containers'][0]['image'],
         labels=pod['metadata']['labels'],
         ports=[Port(
-            port['host_ip'], port['container_port'], port['host_port']
+            port['host_ip'], port['container_port'], port['host_port'],
         ) for port in pod['spec']['containers'][0]['ports']],
         backend_obj=pod,
     )

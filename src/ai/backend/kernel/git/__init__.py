@@ -117,7 +117,7 @@ class Runner(BaseRunner):
                     author=author,
                     message=message,
                     branch=branch,
-                    parent_branches=parent_branches
+                    parent_branches=parent_branches,
                 )
                 commit_info.append(info)
 
@@ -125,8 +125,8 @@ class Runner(BaseRunner):
                 b'media',
                 json.dumps({
                     'type': 'application/vnd.sorna.gitgraph',
-                    'data': commit_info
-                }).encode('utf-8')
+                    'data': commit_info,
+                }).encode('utf-8'),
             ])
         else:
             raise ValueError('Unsupported show target', args.target)
