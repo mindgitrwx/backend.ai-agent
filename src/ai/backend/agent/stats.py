@@ -22,6 +22,7 @@ from typing import (
     Tuple,
     TYPE_CHECKING,
 )
+import aioredis
 
 import attr
 
@@ -242,7 +243,7 @@ class StatContext:
     kernel_metrics: MutableMapping[KernelId, MutableMapping[MetricKey, Metric]]
 
     def __init__(self, agent: 'AbstractAgent', mode: StatModes = None, *,
-                 cache_lifespan: float = 120.0) -> None:
+                 cache_lifespan: int = 120) -> None:
         self.agent = agent
         self.mode = mode if mode is not None else StatModes.get_preferred_mode()
         self.cache_lifespan = cache_lifespan
@@ -381,19 +382,20 @@ class StatContext:
                       self.agent.local_config['agent']['id'], redis_agent_updates['node'])
         serialized_agent_updates = msgpack.packb(redis_agent_updates)
 
-        def _pipe_builder():
-            pipe = self.agent.redis_stat_pool.pipeline()
-            pipe.set(self.agent.local_config['agent']['id'], serialized_agent_updates)
-            pipe.expire(self.agent.local_config['agent']['id'], self.cache_lifespan)
-            for kernel_id, metrics in self.kernel_metrics.items():
-                serialized_metrics = {
-                    key: obj.to_serializable_dict()
-                    for key, obj in metrics.items()
-                }
-                pipe.set(str(kernel_id), msgpack.packb(serialized_metrics))
-                pipe.expire(str(kernel_id), self.cache_lifespan)
-            return pipe
-        await redis.execute_with_retries(_pipe_builder)
+        async def _pipe_builder(r: aioredis.Redis):
+            async with r.pipeline() as pipe:
+                pipe.set(self.agent.local_config['agent']['id'], serialized_agent_updates)
+                pipe.expire(self.agent.local_config['agent']['id'], self.cache_lifespan)
+                for kernel_id, metrics in self.kernel_metrics.items():
+                    serialized_metrics = {
+                        key: obj.to_serializable_dict()
+                        for key, obj in metrics.items()
+                    }
+                    pipe.set(str(kernel_id), msgpack.packb(serialized_metrics))
+                    pipe.expire(str(kernel_id), self.cache_lifespan)
+                await pipe.execute()
+
+        await redis.execute(self.agent.redis_stat_pool, _pipe_builder)
 
     async def collect_container_stat(
         self,
@@ -458,11 +460,12 @@ class StatContext:
                           kernel_id, serializable_metrics)
             serialized_metrics = msgpack.packb(serializable_metrics)
 
-            def _pipe_builder():
-                pipe = self.agent.redis_stat_pool.pipeline()
-                pipe.set(str(kernel_id), serialized_metrics)
-                pipe.expire(str(kernel_id), self.cache_lifespan)
-                return pipe
-            await redis.execute_with_retries(_pipe_builder)
+            async def _pipe_builder(r: aioredis.Redis):
+                async with r.pipeline() as pipe:
+                    pipe.set(str(kernel_id), serialized_metrics)
+                    pipe.expire(str(kernel_id), self.cache_lifespan)
+                    await pipe.execute()
+
+            await redis.execute(self.agent.redis_stat_pool, _pipe_builder)
             return metrics
         return {}

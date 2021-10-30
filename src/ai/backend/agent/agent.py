@@ -566,33 +566,13 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         self.resource_lock = asyncio.Lock()
         self.container_lifecycle_queue = asyncio.Queue()
 
-        async def connect_redis_event_db() -> aioredis.Redis:
-            return await redis.connect_with_retries(
-                self.local_config['redis']['addr'].as_sockaddr(),
-                db=4,  # REDIS_STREAM_DB in gateway.defs
-                password=(self.local_config['redis']['password']
-                        if self.local_config['redis']['password'] else None),
-                encoding=None,
-            )
-
         self.event_producer = await EventProducer.new(
-            connect_redis_event_db,
+            self.local_config['redis'],
+            db=4,
             log_events=self.local_config['debug']['log-events'],
         )
-        self.redis_stream_pool = await redis.connect_with_retries(
-            self.local_config['redis']['addr'].as_sockaddr(),
-            db=4,  # REDIS_STREAM_DB in backend.ai-manager
-            password=(self.local_config['redis']['password']
-                      if self.local_config['redis']['password'] else None),
-            encoding=None,
-        )
-        self.redis_stat_pool = await redis.connect_with_retries(
-            self.local_config['redis']['addr'].as_sockaddr(),
-            db=0,  # REDIS_STAT_DB in backend.ai-manager
-            password=(self.local_config['redis']['password']
-                      if self.local_config['redis']['password'] else None),
-            encoding='utf8',
-        )
+        self.redis_stream_pool = redis.get_redis_object(self.local_config['redis'], db=4)
+        self.redis_stat_pool = redis.get_redis_object(self.local_config['redis'], db=0)
 
         ipc_base_path.mkdir(parents=True, exist_ok=True)
         self.zmq_ctx = zmq.asyncio.Context()
@@ -653,12 +633,10 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         # Notify the gateway.
         await self.produce_event(AgentTerminatedEvent(reason="shutdown"))
 
-        # Close Redis connection pools.
+        # Shut down the event dispatcher and Redis connection pools.
         await self.event_producer.close()
-        self.redis_stream_pool.close()
-        await self.redis_stream_pool.wait_closed()
-        self.redis_stat_pool.close()
-        await self.redis_stat_pool.wait_closed()
+        await self.redis_stream_pool.close()
+        await self.redis_stat_pool.close()
 
         self.zmq_ctx.term()
 
@@ -748,10 +726,10 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                     while chunk_length >= chunk_size:
                         cb = chunk_buffer.getbuffer()
                         stored_chunk = bytes(cb[:chunk_size])
-                        await redis.execute_with_retries(
-                            lambda: self.redis_stream_pool.rpush(
-                                log_key, stored_chunk,
-                            ),
+                        await redis.execute(
+                            self.redis_stream_pool,
+                            lambda r: r.rpush(
+                                log_key, stored_chunk),
                         )
                         remaining = cb[chunk_size:]
                         chunk_length = len(remaining)
@@ -762,10 +740,10 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
                         chunk_buffer = next_chunk_buffer
             assert chunk_length < chunk_size
             if chunk_length > 0:
-                await redis.execute_with_retries(
-                    lambda: self.redis_stream_pool.rpush(
-                        log_key, chunk_buffer.getvalue(),
-                    ),
+                await redis.execute(
+                    self.redis_stream_pool,
+                    lambda r: r.rpush(
+                        log_key, chunk_buffer.getvalue()),
                 )
         finally:
             chunk_buffer.close()
@@ -773,8 +751,9 @@ class AbstractAgent(aobject, Generic[KernelObjectType, KernelCreationContextType
         # This is just a safety measure to prevent memory leak in Redis
         # for cases when the event delivery has failed or processing
         # the log data has failed.
-        await redis.execute_with_retries(
-            lambda: self.redis_stream_pool.expire(log_key, 3600.0),
+        await redis.execute(
+            self.redis_stream_pool,
+            lambda r: r.expire(log_key, 3600),
         )
         await self.produce_event(DoSyncKernelLogsEvent(kernel_id, container_id))
 
