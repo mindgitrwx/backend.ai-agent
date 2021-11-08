@@ -16,6 +16,15 @@ Changes
 
 .. towncrier release notes start
 
+## 21.09.0 (2021-11-08)
+
+### Features
+* Upgrade to aioredis v2 ([#307](https://github.com/lablup/backend.ai-agent/issues/307))
+
+### Fixes
+* Fix a missing update for renaming `kernel-host` to `bind-host` in the initialization codes that auto-fills the value when not specified and let it show an explicit warning if the legacy `kernel-host` key is configured ([#310](https://github.com/lablup/backend.ai-agent/issues/310))
+
+
 ## 21.09.0a2 (2021-09-28)
 
 ### Features
