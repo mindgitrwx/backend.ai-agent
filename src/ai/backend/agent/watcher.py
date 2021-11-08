@@ -9,7 +9,6 @@ import subprocess
 import sys
 
 import aiofiles
-import aiojobs.aiohttp
 from aiohttp import web
 import aiotools
 import click
@@ -252,7 +251,6 @@ async def watcher_server(loop, pidx, args):
 
     app = web.Application()
     app['config'] = args[0]
-    aiojobs.aiohttp.setup(app, close_timeout=10)
 
     etcd_credentials = None
     if app['config']['etcd']['user']:
