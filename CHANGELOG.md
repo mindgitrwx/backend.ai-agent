@@ -16,6 +16,12 @@ Changes
 
 .. towncrier release notes start
 
+## 21.09.1 (2021-11-11)
+
+### Fixes
+* Upgrade aiohttp from 3.7 to 3.8 series ([#314](https://github.com/lablup/backend.ai-agent/issues/314))
+
+
 ## 21.09.0 (2021-11-08)
 
 ### Features
